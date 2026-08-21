@@ -1,3 +1,5 @@
+"""Google Colab runtime detection, fast local paths, precision, and artifact persistence."""
+
 from __future__ import annotations
 
 import shutil
@@ -8,6 +10,7 @@ from typing import Any
 
 
 def is_colab() -> bool:
+    """Return whether execution appears to be inside a hosted Colab VM."""
     return "google.colab" in sys.modules or Path("/content").is_dir()
 
 
@@ -27,6 +30,7 @@ class ColabPaths:
         runtime_dir: Path | str | None = None,
         persistent_dir: Path | str | None = None,
     ) -> ColabPaths:
+        """Create and prepare fast runtime paths plus an optional persistent destination."""
         root = Path(runtime_dir or ("/content/olp_runtime" if is_colab() else "olp_runtime"))
         paths = cls(
             runtime_dir=root,
@@ -38,6 +42,7 @@ class ColabPaths:
         return paths
 
     def prepare(self) -> None:
+        """Create configured runtime, data, output, and optional persistent directories."""
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         if self.persistent_dir:
@@ -45,6 +50,7 @@ class ColabPaths:
 
 
 def mount_google_drive(mount_point: Path | str = "/content/drive") -> Path:
+    """Mount Google Drive in Colab and return the mount path."""
     if not is_colab():
         raise RuntimeError("Google Drive mounting is available only in a hosted Colab runtime")
     from google.colab import drive
@@ -112,6 +118,7 @@ def sync_artifacts(
 
 
 def gpu_report() -> dict[str, Any]:
+    """Report torch, CUDA availability, GPU memory, and BF16 capability."""
     import torch
 
     report: dict[str, Any] = {
@@ -131,6 +138,7 @@ def gpu_report() -> dict[str, Any]:
 
 
 def hf_precision_flags(device: str) -> dict[str, bool]:
+    """Return mutually exclusive BF16/FP16 flags for Hugging Face training arguments."""
     import torch
 
     use_cuda = device == "cuda" and torch.cuda.is_available()
@@ -139,6 +147,7 @@ def hf_precision_flags(device: str) -> dict[str, bool]:
 
 
 def dataloader_kwargs(device: str, num_workers: int) -> dict[str, Any]:
+    """Return safe DataLoader worker, pinned-memory, and persistence settings."""
     return {
         "num_workers": num_workers,
         "pin_memory": device == "cuda",

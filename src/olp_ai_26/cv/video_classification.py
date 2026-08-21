@@ -1,3 +1,5 @@
+"""Uniformly sampled video-frame datasets and temporal-pooling classification models."""
+
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
@@ -16,6 +18,7 @@ from olp_ai_26.cv.classification import build_image_transforms
 
 
 def sample_video_frames(path: Path | str, num_frames: int = 16) -> list[Image.Image]:
+    """Decode approximately uniform RGB frames from a video with OpenCV."""
     capture = cv2.VideoCapture(str(path))
     if not capture.isOpened():
         raise OSError(f"Cannot open video: {path}")
@@ -39,6 +42,8 @@ def sample_video_frames(path: Path | str, num_frames: int = 16) -> list[Image.Im
 
 
 class VideoTableDataset(Dataset[Any]):
+    """Load a fixed number of transformed frames and an optional video label."""
+
     def __init__(
         self,
         frame: pd.DataFrame,
@@ -95,6 +100,7 @@ class TemporalPoolingClassifier(nn.Module):
         self.head = nn.Sequential(nn.Dropout(dropout), nn.Linear(feature_dim, num_classes))
 
     def forward(self, video: torch.Tensor) -> torch.Tensor:
+        """Pool per-frame features over time and return video-level class logits."""
         batch, frames, channels, height, width = video.shape
         features = self.backbone(video.reshape(batch * frames, channels, height, width))
         features = features.reshape(batch, frames, -1)

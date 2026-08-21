@@ -71,6 +71,11 @@ access, but Google does not guarantee a particular GPU type or fixed resource li
 
 ## Available components
 
+Use [the baseline catalog](docs/BASELINE_CATALOG.md) to select a notebook by required output,
+[the model catalog](docs/MODEL_CATALOG.md) to discover supported identifiers, and the
+[customization cookbook](docs/CUSTOMIZATION_GUIDE.md) for copy-ready syntax. The
+[Colab runbook](docs/COLAB_RUNBOOK.md) covers staging and recovery.
+
 ### Shared core
 
 - `core.config`: reproducibility, device resolution, trainer settings, and wall-clock budget.
@@ -87,10 +92,12 @@ access, but Google does not guarantee a particular GPU type or fixed resource li
 
 ### CV
 
-- timm image classification and reusable torchvision transforms.
+- Any timm image classifier, a curated Colab preset catalog, reusable transforms, and named TTA.
 - Frame-sampled video/activity classification with a 2D backbone and temporal pooling.
-- SMP U-Net/FPN/DeepLabV3+ factories and Dice+BCE loss.
-- Local-only Ultralytics YOLO training adapter.
+- Nine SMP semantic-segmentation architectures, encoder discovery, Dice+BCE, RLE, and mask TTA.
+- Faster R-CNN box detection plus a local-only Ultralytics YOLO adapter.
+- Mask R-CNN instance segmentation.
+- Strong timm classification with an auxiliary semantic-segmentation head.
 - FGSM and PGD attacks with perturbation auditing.
 
 ### NLP and multimodal
@@ -103,11 +110,15 @@ access, but Google does not guarantee a particular GPU type or fixed resource li
 
 ## Notebook templates
 
-- `notebooks/cv_classification_template.py`
-- `notebooks/video_classification_template.py`
-- `notebooks/nlp_classification_template.py`
-- `notebooks/seq2seq_template.py`
-- `notebooks/image_captioning_template.py`
+There are 13 generated Colab notebooks. The canonical `*_template.py` sources cover:
+
+- Image/video classification, semantic segmentation, classification plus a mask head, object
+  detection, instance segmentation, and adversarial robustness.
+- TF-IDF and transformer text classification, token classification/NER, retrieval/ranking, and
+  seq2seq generation.
+- Image captioning.
+
+See [the catalog](docs/BASELINE_CATALOG.md) for exact filenames, inputs, outputs, and metrics.
 
 They are source-controlled as Python because diffs remain readable. Export them with:
 

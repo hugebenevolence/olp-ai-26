@@ -1,3 +1,5 @@
+"""Generate a concise Markdown technical report from configs, metrics, and artifacts."""
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -26,6 +28,7 @@ def technical_report(
     checkpoint: str | None = None,
     notes: list[str] | None = None,
 ) -> str:
+    """Render the standard competition handoff report as Markdown text."""
     config = _mapping(training_config)
     lines = [
         "# Technical Report",
@@ -52,6 +55,7 @@ def technical_report(
 
 
 def write_technical_report(content: str, path: Path | str) -> Path:
+    """Write a UTF-8 technical report, creating its parent directory."""
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(content, encoding="utf-8")

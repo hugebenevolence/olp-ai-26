@@ -1,3 +1,5 @@
+"""Compact task-agnostic PyTorch training with AMP, scheduling, and atomic checkpoints."""
+
 from __future__ import annotations
 
 import math
@@ -35,6 +37,7 @@ def resolve_amp(
 
 
 def build_optimizer(model: nn.Module, config: TrainerConfig) -> Optimizer:
+    """Create the configured optimizer over trainable model parameters."""
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     if not parameters:
         raise ValueError("Model has no trainable parameters")
@@ -72,6 +75,7 @@ def build_scheduler(
     config: TrainerConfig,
     total_steps: int,
 ) -> Any | None:
+    """Create the configured step- or metric-driven learning-rate scheduler."""
     if config.scheduler == "none":
         return None
     if total_steps < 1:
@@ -133,6 +137,7 @@ def _forward(model: nn.Module, inputs: Any) -> Any:
 
 
 def default_prediction_decoder(logits: torch.Tensor) -> torch.Tensor:
+    """Decode binary logits at zero or multiclass logits by argmax."""
     if logits.ndim == 1 or logits.shape[-1] == 1:
         return (logits.reshape(-1) >= 0).long()
     return logits.argmax(dim=-1)
@@ -179,6 +184,7 @@ class Trainer:
     def fit(
         self, train_loader: Iterable[Any], valid_loader: Iterable[Any]
     ) -> list[dict[str, float]]:
+        """Train with early stopping and reload the best saved checkpoint."""
         optimizer = build_optimizer(self.model, self.config)
         batches_per_epoch = len(train_loader)  # type: ignore[arg-type]
         update_steps = math.ceil(batches_per_epoch / self.config.gradient_accumulation_steps)
@@ -257,6 +263,7 @@ class Trainer:
 
     @torch.inference_mode()
     def evaluate(self, loader: Iterable[Any]) -> dict[str, float]:
+        """Return average loss and, when configured, decoded validation metric."""
         self.model.eval()
         losses: list[float] = []
         predictions: list[np.ndarray] = []
@@ -280,6 +287,7 @@ class Trainer:
         return result
 
     def save_checkpoint(self, optimizer: Optimizer, epoch: int, score: float) -> Path:
+        """Atomically save model/optimizer state and optionally copy it to durable storage."""
         temporary = self.checkpoint_path.with_suffix(self.checkpoint_path.suffix + ".tmp")
         torch.save(
             {
@@ -299,6 +307,7 @@ class Trainer:
         return self.checkpoint_path
 
     def load_checkpoint(self) -> dict[str, Any]:
+        """Load the best checkpoint into the model and return the full saved payload."""
         source = self.checkpoint_path
         if not source.exists() and self.backup_dir:
             source = self.backup_dir / self.checkpoint_path.name
@@ -308,6 +317,7 @@ class Trainer:
 
 
 def oom_recovery_batch_size(current_batch_size: int) -> int:
+    """Halve a batch size after CUDA OOM while refusing to go below one."""
     if current_batch_size <= 1:
         raise RuntimeError("CUDA out of memory even at batch size 1")
     return max(1, current_batch_size // 2)

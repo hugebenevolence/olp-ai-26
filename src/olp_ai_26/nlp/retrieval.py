@@ -1,3 +1,5 @@
+"""Sparse TF-IDF document retrieval and mean reciprocal-rank evaluation."""
+
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
@@ -11,6 +13,8 @@ from olp_ai_26.nlp.text_cleaning import normalize_text
 
 
 class TfidfRetriever:
+    """Fit a sparse word n-gram index and return cosine-ranked document positions."""
+
     def __init__(
         self, *, ngram_range: tuple[int, int] = (1, 2), max_features: int = 200_000
     ) -> None:
@@ -21,11 +25,13 @@ class TfidfRetriever:
         self.matrix: Any = None
 
     def fit(self, documents: Iterable[object]) -> TfidfRetriever:
+        """Normalize documents and fit/store their sparse TF-IDF matrix."""
         self.documents = [normalize_text(value, lowercase=True) for value in documents]
         self.matrix = self.vectorizer.fit_transform(self.documents)
         return self
 
     def search(self, queries: Iterable[object], top_k: int = 5) -> list[list[tuple[int, float]]]:
+        """Return top document positions and cosine scores for every query."""
         if self.matrix is None:
             raise RuntimeError("Call fit before search")
         cleaned = [normalize_text(value, lowercase=True) for value in queries]
@@ -39,6 +45,7 @@ class TfidfRetriever:
 
 
 def reciprocal_rank(relevant: Sequence[set[int]], ranked: Sequence[Sequence[int]]) -> float:
+    """Compute mean reciprocal rank from relevant-item sets and ranked item sequences."""
     values = []
     for expected, predictions in zip(relevant, ranked, strict=True):
         rank = next(

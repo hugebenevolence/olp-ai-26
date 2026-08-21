@@ -1,3 +1,5 @@
+"""Registry of common classification, regression, vision, and generation metrics."""
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -13,6 +15,8 @@ MetricFunction = Callable[..., float]
 
 @dataclass(frozen=True, slots=True)
 class MetricSpec:
+    """Metric callable plus whether larger values are better."""
+
     function: MetricFunction
     maximize: bool
 
@@ -104,6 +108,7 @@ METRICS: dict[str, MetricSpec] = {
 
 
 def get_metric(name: str) -> MetricSpec:
+    """Resolve a case-insensitive metric name and explain valid alternatives on failure."""
     try:
         return METRICS[name.lower()]
     except KeyError as error:
@@ -112,4 +117,5 @@ def get_metric(name: str) -> MetricSpec:
 
 
 def evaluate_metric(name: str, y_true: Any, y_pred: Any, **kwargs: Any) -> float:
+    """Evaluate a registered metric with optional metric-specific keyword arguments."""
     return get_metric(name).function(y_true, y_pred, **kwargs)

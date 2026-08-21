@@ -1,3 +1,5 @@
+"""Local-first sequence-to-sequence model construction, tokenization, and decoding."""
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -37,6 +39,7 @@ def tokenize_seq2seq_batch(
     max_source_length: int = 256,
     max_target_length: int = 256,
 ) -> dict[str, Any]:
+    """Tokenize source and target text columns with independent maximum lengths."""
     inputs = [source_prefix + str(value) for value in batch[source_column]]
     targets = [str(value) for value in batch[target_column]]
     encoded = tokenizer(inputs, max_length=max_source_length, truncation=True)
@@ -46,6 +49,7 @@ def tokenize_seq2seq_batch(
 
 
 def decode_generated(tokenizer: Any, token_ids: Any) -> list[str]:
+    """Decode generated token IDs while removing special tokens and spacing artifacts."""
     return tokenizer.batch_decode(
         token_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True
     )

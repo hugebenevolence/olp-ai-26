@@ -1,3 +1,5 @@
+"""Build, validate, and atomically write competition submission tables."""
+
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
@@ -9,11 +11,14 @@ import pandas as pd
 
 @dataclass(slots=True)
 class SubmissionValidation:
+    """Validation errors and non-fatal warnings for a candidate submission."""
+
     valid: bool
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
     def raise_for_errors(self) -> None:
+        """Raise one ``ValueError`` containing every validation error."""
         if self.errors:
             raise ValueError("Invalid submission: " + "; ".join(self.errors))
 
@@ -22,6 +27,7 @@ def build_submission(
     sample: pd.DataFrame,
     predictions: Mapping[str, Sequence[object]],
 ) -> pd.DataFrame:
+    """Copy a sample submission and replace specified prediction columns."""
     submission = sample.copy()
     for column, values in predictions.items():
         if column not in submission.columns:
@@ -41,6 +47,7 @@ def validate_submission(
     id_columns: str | Iterable[str] | None = None,
     allowed_labels: Mapping[str, Iterable[object]] | None = None,
 ) -> SubmissionValidation:
+    """Check schema, row count, ID order, missing values, and optional allowed labels."""
     errors: list[str] = []
     warnings: list[str] = []
     if list(submission.columns) != list(sample.columns):
@@ -75,6 +82,7 @@ def write_submission(
     sample: pd.DataFrame | None = None,
     id_columns: str | Iterable[str] | None = None,
 ) -> Path:
+    """Validate then atomically write a UTF-8 CSV submission."""
     if sample is not None:
         validation = validate_submission(submission, sample, id_columns=id_columns)
         validation.raise_for_errors()

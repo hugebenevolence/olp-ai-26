@@ -1,3 +1,5 @@
+"""Convert readable percent-style Python templates into Colab-ready notebooks."""
+
 from __future__ import annotations
 
 import json
@@ -60,6 +62,7 @@ def percent_script_to_notebook(source: Path | str, destination: Path | str) -> P
 
 
 def build_all_notebooks(root: Path | str = "notebooks") -> list[Path]:
+    """Regenerate every ``*_template.ipynb`` from its canonical Python source."""
     root_path = Path(root)
     outputs = []
     for source in sorted(root_path.glob("*_template.py")):

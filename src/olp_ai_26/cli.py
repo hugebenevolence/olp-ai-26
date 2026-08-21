@@ -1,3 +1,5 @@
+"""Command-line entry points for inspection, submission validation, and notebook export."""
+
 from __future__ import annotations
 
 import argparse
@@ -54,6 +56,7 @@ def _build_notebooks(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Construct the ``olp-ai`` argument parser and its competition utility commands."""
     parser = argparse.ArgumentParser(prog="olp-ai", description="OlympicAI competition toolkit")
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -79,6 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Parse command-line arguments and return the selected command's exit status."""
     args = build_parser().parse_args(argv)
     return int(args.handler(args))
 

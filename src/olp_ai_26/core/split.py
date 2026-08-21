@@ -1,3 +1,5 @@
+"""Deterministic random, stratified, grouped, and chronological holdout splitting."""
+
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -14,6 +16,8 @@ from sklearn.model_selection import (
 
 @dataclass(slots=True)
 class SplitResult:
+    """Training/validation tables plus their original positional indexes."""
+
     train: pd.DataFrame
     valid: pd.DataFrame
     train_indices: np.ndarray

@@ -17,7 +17,16 @@ if source_root not in sys.path:
     sys.path.insert(0, source_root)
 
 if IN_COLAB:
-    required_modules = ("timm", "sacrebleu", "rouge_score", "seqeval")
+    required_modules = (
+        "accelerate",
+        "datasets",
+        "segmentation_models_pytorch",
+        "timm",
+        "transformers",
+        "sacrebleu",
+        "rouge_score",
+        "seqeval",
+    )
     if any(importlib.util.find_spec(module) is None for module in required_modules):
         subprocess.run(
             [

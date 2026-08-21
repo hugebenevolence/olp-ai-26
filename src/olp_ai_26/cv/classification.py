@@ -1,3 +1,5 @@
+"""Table-backed image classification datasets, transforms, models, and losses."""
+
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
@@ -15,6 +17,8 @@ from torchvision.transforms import v2
 
 
 class ImageTableDataset(Dataset[Any]):
+    """Load RGB images and optional class indexes from a pandas annotation table."""
+
     def __init__(
         self,
         frame: pd.DataFrame,
@@ -54,6 +58,7 @@ def build_image_transforms(
     training: bool,
     normalize: bool = True,
 ) -> Callable[[Image.Image], torch.Tensor]:
+    """Build conservative training or deterministic validation transforms."""
     operations: list[Any]
     if training:
         operations = [
@@ -71,6 +76,7 @@ def build_image_transforms(
 
 
 def label_mapping(labels: pd.Series) -> tuple[dict[object, int], dict[int, object]]:
+    """Create stable forward and inverse indexes from arbitrary class labels."""
     classes = sorted(labels.dropna().unique().tolist(), key=str)
     forward = {label: index for index, label in enumerate(classes)}
     return forward, {index: label for label, index in forward.items()}
@@ -96,6 +102,7 @@ def build_image_classifier(
 
 
 def class_weights(labels: pd.Series, mapping: Mapping[object, int]) -> torch.Tensor:
+    """Compute inverse-frequency class weights aligned with a label mapping."""
     counts = labels.map(mapping).value_counts().sort_index()
     weights = len(labels) / (len(mapping) * counts.reindex(range(len(mapping)), fill_value=1))
     return torch.tensor(weights.to_numpy(dtype=np.float32))
@@ -107,6 +114,7 @@ def classification_loss(
     weights: torch.Tensor | None = None,
     label_smoothing: float = 0.0,
 ) -> nn.Module:
+    """Select BCE-with-logits for multilabel data or cross entropy for single-label data."""
     if multilabel:
         return nn.BCEWithLogitsLoss(pos_weight=weights)
     return nn.CrossEntropyLoss(weight=weights, label_smoothing=label_smoothing)

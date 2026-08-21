@@ -1,3 +1,5 @@
+"""Local image-captioning dataset, model factory, and generation helpers."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -10,6 +12,8 @@ from torch.utils.data import Dataset
 
 
 class ImageCaptionDataset(Dataset[dict[str, torch.Tensor]]):
+    """Preprocess image/caption table rows for a Hugging Face vision-language model."""
+
     def __init__(
         self,
         frame: pd.DataFrame,
@@ -79,6 +83,7 @@ def generate_captions(
     max_new_tokens: int = 64,
     num_beams: int = 4,
 ) -> list[str]:
+    """Generate and decode captions for batches of preprocessed pixel values."""
     encoded = processor(images=images, return_tensors="pt")
     pixel_values = encoded["pixel_values"].to(device)
     generated = model.generate(

@@ -1,3 +1,5 @@
+"""CPU TF-IDF and local-first Hugging Face text-classification baselines."""
+
 from __future__ import annotations
 
 from collections.abc import Iterable
@@ -58,13 +60,16 @@ class TfidfTextClassifier:
         return [normalize_text(text, lowercase=True, replace_urls=True) for text in texts]
 
     def fit(self, texts: Iterable[object], labels: Iterable[object]) -> TfidfTextClassifier:
+        """Normalize texts and fit the sparse feature/classifier pipeline."""
         self.pipeline.fit(self._clean(texts), list(labels))
         return self
 
     def predict(self, texts: Iterable[object]) -> np.ndarray:
+        """Predict original label values for normalized input texts."""
         return self.pipeline.predict(self._clean(texts))
 
     def predict_proba(self, texts: Iterable[object]) -> np.ndarray:
+        """Predict class probabilities in the fitted classifier's class order."""
         return self.pipeline.predict_proba(self._clean(texts))
 
 
@@ -76,6 +81,7 @@ def build_hf_text_classifier(
     local_files_only: bool = True,
     **kwargs: Any,
 ) -> Any:
+    """Build a sequence classifier from legal local/config weights without implicit downloads."""
     from transformers import AutoConfig, AutoModelForSequenceClassification
 
     source = str(model_name_or_path)

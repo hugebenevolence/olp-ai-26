@@ -19,7 +19,22 @@ def test_percent_script_export(tmp_path):
 def test_generated_colab_notebooks_are_valid_and_compilable():
     notebook_dir = Path(__file__).parents[1] / "notebooks"
     notebooks = sorted(notebook_dir.glob("*_template.ipynb"))
-    assert len(notebooks) == 5
+    expected = {
+        "adversarial_robustness_template.ipynb",
+        "classification_segmentation_template.ipynb",
+        "cv_classification_template.ipynb",
+        "image_captioning_template.ipynb",
+        "instance_segmentation_template.ipynb",
+        "nlp_classification_template.ipynb",
+        "object_detection_template.ipynb",
+        "retrieval_template.ipynb",
+        "semantic_segmentation_template.ipynb",
+        "seq2seq_template.ipynb",
+        "token_classification_template.ipynb",
+        "transformer_text_classification_template.ipynb",
+        "video_classification_template.ipynb",
+    }
+    assert {path.name for path in notebooks} == expected
     for path in notebooks:
         payload = json.loads(path.read_text(encoding="utf-8"))
         assert payload["metadata"]["accelerator"] == "GPU"

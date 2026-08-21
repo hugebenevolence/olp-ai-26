@@ -1,3 +1,5 @@
+"""Offline JSON Lines experiment logging for contest-safe provenance."""
+
 from __future__ import annotations
 
 import json
@@ -25,6 +27,7 @@ class ExperimentLogger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def log(self, event: str, **payload: Any) -> None:
+        """Append a timestamped event and JSON-compatible payload atomically to the log."""
         record = {
             "timestamp": datetime.now(UTC).isoformat(),
             "event": event,
@@ -35,6 +38,7 @@ class ExperimentLogger:
 
 
 def read_experiments(path: Path | str) -> list[dict[str, Any]]:
+    """Read all non-empty JSON Lines experiment records from a file."""
     source = Path(path)
     if not source.exists():
         return []

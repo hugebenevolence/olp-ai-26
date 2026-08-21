@@ -41,6 +41,8 @@ from olp_ai_26.cv.classification import (
     classification_loss,
     label_mapping,
 )
+from olp_ai_26.cv.model_catalog import list_supported_classifiers, model_preset_rows
+from olp_ai_26.cv.tta import build_classification_tta
 
 # %% [markdown]
 # ## 0. Drag-and-plug configuration
@@ -63,6 +65,7 @@ ID_COLUMN = "id"
 MODEL_NAME = "resnet18"
 IMAGE_SIZE = 224
 BATCH_SIZE = 32
+TTA_NAMES = ("identity", "hflip")  # use ("identity",) to disable
 
 competition = CompetitionConfig(
     data_dir=DATA_DIR,
@@ -73,6 +76,9 @@ training = TrainerConfig(epochs=8, learning_rate=3e-4, metric_name="macro_f1")
 competition.prepare()
 budget = TimeBudget(competition.time_budget_minutes)
 print(gpu_report())
+print(pd.DataFrame(model_preset_rows()))
+# Discover every accepted timm identifier by keyword. Examples: "*convnext*", "*swin*", "vit*".
+print(list_supported_classifiers("*resnet*", pretrained=False)[:30])
 
 # %% [markdown]
 # ## 1. Inspect before modeling
@@ -145,7 +151,12 @@ test_ds = ImageTableDataset(
     transform=build_image_transforms(size=IMAGE_SIZE, training=False),
 )
 test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE * 2, shuffle=False, **loader_options)
-logits = predict_logits(model, test_loader, device=competition.device)
+logits = predict_logits(
+    model,
+    test_loader,
+    device=competition.device,
+    transforms=build_classification_tta(TTA_NAMES),
+)
 labels = [index_to_label[index] for index in logits.argmax(axis=1)]
 submission = build_submission(sample, {TARGET_COLUMN: labels})
 write_submission(

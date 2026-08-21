@@ -1,6 +1,10 @@
 # Keep Colab's CUDA-matched torch/torchvision/numpy stack intact.
 # These are the small packages used by the baseline notebooks that are not always preinstalled.
 timm>=1.0,<2
+segmentation-models-pytorch>=0.4,<0.6
+transformers>=4.45,<6
+datasets>=3,<5
+accelerate>=1,<2
 sacrebleu>=2.4,<3
 rouge-score>=0.1.2,<0.2
 seqeval>=1.2,<2

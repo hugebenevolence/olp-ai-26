@@ -1,3 +1,5 @@
+"""Device-aware logits prediction, inference timing, TTA averaging, and ensembles."""
+
 from __future__ import annotations
 
 import time
@@ -30,6 +32,7 @@ def predict_logits(
     transforms: list[Callable[[Any], Any]] | None = None,
     mixed_precision: bool = True,
 ) -> np.ndarray:
+    """Predict and average model logits over optional input-level TTA transforms."""
     resolved = torch.device(
         device if device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
     )
@@ -63,6 +66,7 @@ def benchmark_inference(
     total_batches: int,
     warmup_batches: int = 2,
 ) -> dict[str, float]:
+    """Measure one batch and estimate total inference time after warmup."""
     for _ in range(warmup_batches):
         predict_one_batch()
     if torch.cuda.is_available():
@@ -81,6 +85,7 @@ def benchmark_inference(
 def weighted_ensemble(
     predictions: list[np.ndarray], weights: list[float] | None = None
 ) -> np.ndarray:
+    """Average shape-compatible prediction arrays using normalized non-negative weights."""
     if not predictions:
         raise ValueError("At least one prediction array is required")
     if any(item.shape != predictions[0].shape for item in predictions):

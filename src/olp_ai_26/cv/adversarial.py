@@ -1,3 +1,5 @@
+"""FGSM/PGD adversarial attacks and perturbation-size auditing."""
+
 from __future__ import annotations
 
 import torch
@@ -14,6 +16,7 @@ def fgsm(
     clip_min: float = 0.0,
     clip_max: float = 1.0,
 ) -> torch.Tensor:
+    """Generate a one-step, epsilon-bounded fast-gradient-sign attack."""
     loss_fn = loss_fn or nn.CrossEntropyLoss()
     attacked = images.detach().clone().requires_grad_(True)
     loss = loss_fn(model(attacked), labels)
@@ -34,6 +37,7 @@ def pgd(
     clip_min: float = 0.0,
     clip_max: float = 1.0,
 ) -> torch.Tensor:
+    """Generate an iterative projected-gradient attack within an L-infinity ball."""
     loss_fn = loss_fn or nn.CrossEntropyLoss()
     original = images.detach()
     if random_start:
@@ -52,6 +56,7 @@ def pgd(
 
 
 def perturbation_statistics(original: torch.Tensor, attacked: torch.Tensor) -> dict[str, float]:
+    """Summarize maximum, average L2, and changed-pixel perturbation sizes."""
     difference = (attacked - original).detach().float()
     return {
         "linf": float(difference.abs().max()),

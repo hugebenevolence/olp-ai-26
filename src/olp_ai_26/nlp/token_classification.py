@@ -1,3 +1,5 @@
+"""Local-first token-classifier construction and word-to-subword label alignment."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -11,6 +13,7 @@ def build_token_classifier(
     pretrained_allowed: bool = False,
     local_files_only: bool = True,
 ) -> tuple[Any, Any]:
+    """Build a fast tokenizer and token classifier without implicit weight downloads."""
     from transformers import AutoConfig, AutoModelForTokenClassification, AutoTokenizer
 
     source = str(model_name_or_path)
@@ -36,6 +39,7 @@ def tokenize_and_align_labels(
     label_column: str = "ner_tags",
     label_all_tokens: bool = False,
 ) -> dict[str, Any]:
+    """Tokenize split words and align word labels with generated subword positions."""
     encoded = tokenizer(batch[token_column], truncation=True, is_split_into_words=True)
     aligned: list[list[int]] = []
     for batch_index, labels in enumerate(batch[label_column]):

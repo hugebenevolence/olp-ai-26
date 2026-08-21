@@ -1,3 +1,5 @@
+"""Text and file-identity checks for duplicates and cross-split leakage."""
+
 from __future__ import annotations
 
 import hashlib
@@ -11,11 +13,13 @@ import pandas as pd
 
 
 def normalize_text(value: object) -> str:
+    """Normalize Unicode, whitespace, and case for duplicate comparison only."""
     text = unicodedata.normalize("NFC", str(value)).casefold().strip()
     return re.sub(r"\s+", " ", text)
 
 
 def duplicate_text_groups(frame: pd.DataFrame, column: str) -> list[list[int]]:
+    """Return index groups whose normalized text occurs more than once."""
     if column not in frame:
         raise KeyError(column)
     groups: dict[str, list[int]] = defaultdict(list)
@@ -30,6 +34,7 @@ def cross_split_overlap(
     valid: pd.DataFrame,
     columns: str | Iterable[str],
 ) -> pd.DataFrame:
+    """Return validation rows whose normalized selected-column key also occurs in training."""
     selected = [columns] if isinstance(columns, str) else list(columns)
     for column in selected:
         if column not in train or column not in valid:
@@ -41,6 +46,7 @@ def cross_split_overlap(
 
 
 def file_hashes(paths: Iterable[Path | str]) -> dict[str, list[str]]:
+    """Group input paths by byte-level SHA-256 digest."""
     groups: dict[str, list[str]] = defaultdict(list)
     for item in paths:
         path = Path(item)

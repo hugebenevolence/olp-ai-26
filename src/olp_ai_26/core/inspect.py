@@ -1,3 +1,5 @@
+"""Dataset inventory, table profiling, image integrity checks, and environment reporting."""
+
 from __future__ import annotations
 
 import hashlib
@@ -20,6 +22,8 @@ VIDEO_SUFFIXES = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
 
 @dataclass(slots=True)
 class TableProfile:
+    """Serializable dimensions, dtypes, missingness, and cardinality for one table."""
+
     rows: int
     columns: list[str]
     dtypes: dict[str, str]
@@ -29,11 +33,14 @@ class TableProfile:
     memory_mb: float
 
     def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-compatible table-profile dictionary."""
         return asdict(self)
 
 
 @dataclass(slots=True)
 class MediaProfile:
+    """Serializable valid/corrupt counts, shapes, and duplicate hashes for image files."""
+
     scanned: int
     valid: int
     corrupt: list[str]
@@ -41,6 +48,7 @@ class MediaProfile:
     duplicate_groups: list[list[str]]
 
     def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-compatible media-profile dictionary."""
         return asdict(self)
 
 
@@ -64,6 +72,7 @@ def discover_files(root: Path | str) -> dict[str, list[Path]]:
 
 
 def load_table(path: Path | str) -> pd.DataFrame:
+    """Load a CSV, TSV, JSON/JSONL, or Parquet table based on its extension."""
     path = Path(path)
     suffix = path.suffix.lower()
     if suffix == ".csv":
@@ -78,6 +87,7 @@ def load_table(path: Path | str) -> pd.DataFrame:
 
 
 def profile_table(frame: pd.DataFrame) -> TableProfile:
+    """Summarize a pandas table without changing its rows or columns."""
     return TableProfile(
         rows=len(frame),
         columns=[str(column) for column in frame.columns],
@@ -98,6 +108,7 @@ def _sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
 
 
 def profile_images(paths: Iterable[Path | str], limit: int | None = 5000) -> MediaProfile:
+    """Verify images, collect shapes, and group byte-identical files by SHA-256."""
     selected = [Path(path) for path in paths]
     if limit is not None:
         selected = selected[:limit]
@@ -124,6 +135,7 @@ def profile_images(paths: Iterable[Path | str], limit: int | None = 5000) -> Med
 
 
 def environment_report() -> dict[str, Any]:
+    """Return Python, platform, CPU, RAM, torch, and optional CUDA details."""
     report: dict[str, Any] = {
         "python": sys.version.split()[0],
         "platform": platform.platform(),
@@ -146,6 +158,7 @@ def environment_report() -> dict[str, Any]:
 
 
 def dataset_report(root: Path | str, image_limit: int = 1000) -> dict[str, Any]:
+    """Combine file discovery and lightweight table/image profiles for a dataset root."""
     inventory = discover_files(root)
     tables = {}
     for path in inventory["tables"]:
@@ -164,6 +177,7 @@ def dataset_report(root: Path | str, image_limit: int = 1000) -> dict[str, Any]:
 
 
 def save_report(report: dict[str, Any], path: Path | str) -> Path:
+    """Write a dataset/environment report as indented UTF-8 JSON."""
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
