@@ -1,13 +1,12 @@
 [project]
 name = "olp-ai-26"
 version = "0.1.0"
-description = "Add your description here"
+description = "Reusable six-hour competition baselines for OlympicAI Vietnam 2026"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "numpy>=2.0",
     "pandas>=2.2",
-    "polars>=1.0",
     "scipy>=1.13",
     "scikit-learn>=1.5",
     "pyarrow>=17.0",
@@ -15,42 +14,64 @@ dependencies = [
     "pyyaml>=6.0",
     "torch>=2.7",
     "torchvision>=0.22",
-    "torchaudio>=2.7",
     "pillow>=10.4",
     "opencv-python-headless>=4.10",
     "scikit-image>=0.24",
-    "albumentations>=2.0",
     "timm>=1.0",
-    "ultralytics>=8.3",
-    "segmentation-models-pytorch>=0.4",
     "transformers>=4.45",
     "datasets>=3.0",
     "tokenizers>=0.20",
-    "sentence-transformers>=3.1",
     "accelerate>=1.0",
-    "peft>=0.13",
-    "evaluate>=0.4",
     "safetensors>=0.4",
-    "mlflow>=2.16",
-    "wandb>=0.18",
-    "matplotlib>=3.9",
-    "seaborn>=0.13",
-    "plotly>=5.24",
-    "tensorboard>=2.17",
-    "kagglehub>=0.3",
-    "requests>=2.32",
-    "jupyterlab>=4.2",
-    "ipykernel>=6.29",
+    "sacrebleu>=2.4",
+    "rouge-score>=0.1.2",
+    "seqeval>=1.2",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.9",
+]
+cv-extra = [
+    "albumentations>=2.0",
+    "segmentation-models-pytorch>=0.4",
+    "ultralytics>=8.3",
+]
+nlp-extra = [
+    "evaluate>=0.4",
+    "peft>=0.13",
+    "sentence-transformers>=3.1",
+]
+notebook = [
+    "ipykernel>=6.29",
+    "jupyterlab>=4.2",
+    "matplotlib>=3.9",
+    "seaborn>=0.13",
+]
+tracking = [
+    "mlflow>=2.16",
+    "tensorboard>=2.17",
+    "wandb>=0.18",
+]
+fast-data = ["polars>=1.0"]
+audio = ["torchaudio>=2.7"]
+
 [project.scripts]
-nvp1 = "nvp1:main"
+olp-ai = "olp_ai_26.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]
 build-backend = "uv_build"
 
-[tool.uv.workspace]
-members = [
-    "olp-ai-26",
-]
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["notebooks/*.ipynb"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
