@@ -28,11 +28,14 @@ def predict_logits(
     *,
     device: str = "cuda",
     transforms: list[Callable[[Any], Any]] | None = None,
+    mixed_precision: bool = True,
 ) -> np.ndarray:
     resolved = torch.device(
         device if device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
     )
     model = model.to(resolved).eval()
+    use_amp = mixed_precision and resolved.type == "cuda"
+    amp_dtype = torch.bfloat16 if use_amp and torch.cuda.is_bf16_supported() else torch.float16
     transforms = transforms or [lambda value: value]
     outputs: list[np.ndarray] = []
     for batch in loader:
@@ -40,9 +43,14 @@ def predict_logits(
         augmented = []
         for transform in transforms:
             transformed = transform(inputs)
-            output = (
-                model(**transformed) if isinstance(transformed, Mapping) else model(transformed)
-            )
+            with torch.autocast(
+                device_type=resolved.type,
+                dtype=amp_dtype,
+                enabled=use_amp,
+            ):
+                output = (
+                    model(**transformed) if isinstance(transformed, Mapping) else model(transformed)
+                )
             logits = output.logits if hasattr(output, "logits") else output
             augmented.append(logits.float())
         outputs.append(torch.stack(augmented).mean(dim=0).cpu().numpy())

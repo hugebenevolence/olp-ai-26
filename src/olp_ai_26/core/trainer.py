@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import shutil
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,25 @@ from torch.optim import Optimizer
 
 from olp_ai_26.core.config import TimeBudget, TrainerConfig
 from olp_ai_26.core.experiment import ExperimentLogger
+
+
+def resolve_amp(
+    device: torch.device,
+    preference: str | bool,
+) -> tuple[bool, torch.dtype | None, bool]:
+    """Return autocast enabled, dtype, and GradScaler enabled for the actual GPU."""
+    if device.type != "cuda" or preference in {False, "none"}:
+        return False, None, False
+    normalized = "auto" if preference is True else str(preference)
+    if normalized == "bf16":
+        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    elif normalized == "fp16":
+        dtype = torch.float16
+    elif normalized == "auto":
+        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    else:
+        raise ValueError(f"Unsupported mixed precision mode: {preference}")
+    return True, dtype, dtype == torch.float16
 
 
 def build_optimizer(model: nn.Module, config: TrainerConfig) -> Optimizer:
@@ -133,6 +153,7 @@ class Trainer:
         prediction_decoder: Callable[[torch.Tensor], torch.Tensor] = default_prediction_decoder,
         time_budget: TimeBudget | None = None,
         logger: ExperimentLogger | None = None,
+        backup_dir: Path | str | None = None,
     ) -> None:
         resolved = "cuda" if device == "auto" and torch.cuda.is_available() else device
         self.device = torch.device("cpu" if resolved == "auto" else resolved)
@@ -145,8 +166,15 @@ class Trainer:
         self.prediction_decoder = prediction_decoder
         self.time_budget = time_budget
         self.logger = logger
+        self.backup_dir = Path(backup_dir) if backup_dir else None
+        if self.backup_dir:
+            self.backup_dir.mkdir(parents=True, exist_ok=True)
         self.history: list[dict[str, float]] = []
         self.checkpoint_path = self.output_dir / config.checkpoint_name
+        self.amp_enabled, self.amp_dtype, scaler_enabled = resolve_amp(
+            self.device, config.mixed_precision
+        )
+        self.scaler = torch.amp.GradScaler("cuda", enabled=scaler_enabled)
 
     def fit(
         self, train_loader: Iterable[Any], valid_loader: Iterable[Any]
@@ -155,16 +183,14 @@ class Trainer:
         batches_per_epoch = len(train_loader)  # type: ignore[arg-type]
         update_steps = math.ceil(batches_per_epoch / self.config.gradient_accumulation_steps)
         scheduler = build_scheduler(optimizer, self.config, update_steps * self.config.epochs)
-        use_amp = self.config.mixed_precision and self.device.type == "cuda"
-        scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
         best = -math.inf if self.config.maximize_metric else math.inf
         stale_epochs = 0
 
         for epoch in range(1, self.config.epochs + 1):
             if self.time_budget and self.time_budget.should_stop:
                 break
-            train_loss = self._train_epoch(train_loader, optimizer, scheduler, scaler, use_amp)
-            valid = self.evaluate(valid_loader, use_amp=use_amp)
+            train_loss = self._train_epoch(train_loader, optimizer, scheduler)
+            valid = self.evaluate(valid_loader)
             score = valid.get(
                 "metric", -valid["loss"] if self.config.maximize_metric else valid["loss"]
             )
@@ -192,8 +218,6 @@ class Trainer:
         loader: Iterable[Any],
         optimizer: Optimizer,
         scheduler: Any | None,
-        scaler: torch.amp.GradScaler,
-        use_amp: bool,
     ) -> float:
         self.model.train()
         optimizer.zero_grad(set_to_none=True)
@@ -201,42 +225,49 @@ class Trainer:
         count = 0
         for step, batch in enumerate(loader, start=1):
             inputs, targets = _split_batch(batch, self.device)
-            with torch.autocast(device_type=self.device.type, enabled=use_amp):
+            with torch.autocast(
+                device_type=self.device.type,
+                dtype=self.amp_dtype,
+                enabled=self.amp_enabled,
+            ):
                 logits = _forward(self.model, inputs)
                 loss = self.criterion(logits, targets) / self.config.gradient_accumulation_steps
-            scaler.scale(loss).backward()
+            self.scaler.scale(loss).backward()
             total_loss += float(loss.detach()) * self.config.gradient_accumulation_steps
             count += 1
             should_update = step % self.config.gradient_accumulation_steps == 0
             if should_update:
                 if self.config.max_grad_norm is not None:
-                    scaler.unscale_(optimizer)
+                    self.scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(
                         self.model.parameters(), self.config.max_grad_norm
                     )
-                scaler.step(optimizer)
-                scaler.update()
+                self.scaler.step(optimizer)
+                self.scaler.update()
                 optimizer.zero_grad(set_to_none=True)
                 if scheduler is not None and self.config.scheduler != "plateau":
                     scheduler.step()
             if self.time_budget and self.time_budget.should_stop:
                 break
         if count and count % self.config.gradient_accumulation_steps:
-            scaler.step(optimizer)
-            scaler.update()
+            self.scaler.step(optimizer)
+            self.scaler.update()
             optimizer.zero_grad(set_to_none=True)
         return total_loss / max(1, count)
 
     @torch.inference_mode()
-    def evaluate(self, loader: Iterable[Any], *, use_amp: bool | None = None) -> dict[str, float]:
+    def evaluate(self, loader: Iterable[Any]) -> dict[str, float]:
         self.model.eval()
-        use_amp = bool(use_amp and self.device.type == "cuda")
         losses: list[float] = []
         predictions: list[np.ndarray] = []
         targets_all: list[np.ndarray] = []
         for batch in loader:
             inputs, targets = _split_batch(batch, self.device)
-            with torch.autocast(device_type=self.device.type, enabled=use_amp):
+            with torch.autocast(
+                device_type=self.device.type,
+                dtype=self.amp_dtype,
+                enabled=self.amp_enabled,
+            ):
                 logits = _forward(self.model, inputs)
                 losses.append(float(self.criterion(logits, targets)))
             predictions.append(self.prediction_decoder(logits).detach().cpu().numpy())
@@ -249,6 +280,7 @@ class Trainer:
         return result
 
     def save_checkpoint(self, optimizer: Optimizer, epoch: int, score: float) -> Path:
+        temporary = self.checkpoint_path.with_suffix(self.checkpoint_path.suffix + ".tmp")
         torch.save(
             {
                 "model": self.model.state_dict(),
@@ -256,12 +288,21 @@ class Trainer:
                 "epoch": epoch,
                 "score": score,
             },
-            self.checkpoint_path,
+            temporary,
         )
+        temporary.replace(self.checkpoint_path)
+        if self.backup_dir:
+            backup = self.backup_dir / self.checkpoint_path.name
+            backup_temporary = backup.with_suffix(backup.suffix + ".tmp")
+            shutil.copy2(self.checkpoint_path, backup_temporary)
+            backup_temporary.replace(backup)
         return self.checkpoint_path
 
     def load_checkpoint(self) -> dict[str, Any]:
-        checkpoint = torch.load(self.checkpoint_path, map_location=self.device, weights_only=True)
+        source = self.checkpoint_path
+        if not source.exists() and self.backup_dir:
+            source = self.backup_dir / self.checkpoint_path.name
+        checkpoint = torch.load(source, map_location=self.device, weights_only=True)
         self.model.load_state_dict(checkpoint["model"])
         return checkpoint
 

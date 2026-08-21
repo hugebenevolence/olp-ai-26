@@ -91,7 +91,7 @@ class TrainerConfig:
     warmup_ratio: float = 0.1
     gradient_accumulation_steps: int = 1
     max_grad_norm: float | None = 1.0
-    mixed_precision: bool = True
+    mixed_precision: Literal["auto", "fp16", "bf16", "none"] | bool = "auto"
     patience: int = 3
     metric_name: str = "macro_f1"
     maximize_metric: bool = True
@@ -104,6 +104,8 @@ class TrainerConfig:
             raise ValueError("learning_rate must be positive")
         if self.gradient_accumulation_steps < 1:
             raise ValueError("gradient_accumulation_steps must be at least 1")
+        if self.mixed_precision not in {True, False, "auto", "fp16", "bf16", "none"}:
+            raise ValueError("mixed_precision must be auto, fp16, bf16, none, or a boolean")
 
 
 class TimeBudget:

@@ -3,12 +3,30 @@
 # Change only the configuration cell first.
 # Obtain one valid local score and submission before tuning.
 
+# %% [markdown]
+# ## Colab bootstrap
+# Upload or clone the repository to `/content/olp-ai-26`. The bootstrap preserves Colab's
+# CUDA-matched PyTorch stack and installs only small missing notebook dependencies.
+
 # %%
+import sys
 from pathlib import Path
 
+PROJECT_ROOT = Path("/content/olp-ai-26") if "google.colab" in sys.modules else Path.cwd()
+exec((PROJECT_ROOT / "notebooks" / "_colab_bootstrap.py").read_text(encoding="utf-8"))
+
+# %%
 import pandas as pd
 from torch.utils.data import DataLoader
 
+from olp_ai_26.core.colab import (
+    ColabPaths,
+    dataloader_kwargs,
+    gpu_report,
+    mount_google_drive,
+    stage_data,
+    sync_artifacts,
+)
 from olp_ai_26.core.config import CompetitionConfig, TimeBudget, TrainerConfig
 from olp_ai_26.core.inference import predict_logits
 from olp_ai_26.core.inspect import dataset_report
@@ -28,7 +46,14 @@ from olp_ai_26.cv.classification import (
 # ## 0. Drag-and-plug configuration
 
 # %%
-DATA_DIR = Path("data")
+DRIVE_DATA_ARCHIVE = None  # or Path("/content/drive/MyDrive/olpai26/data.zip")
+PERSISTENT_DIR = None  # or Path("/content/drive/MyDrive/olpai26/cv")
+if DRIVE_DATA_ARCHIVE or PERSISTENT_DIR:
+    mount_google_drive()
+paths = ColabPaths.create(persistent_dir=PERSISTENT_DIR)
+DATA_DIR = paths.data_dir
+if DRIVE_DATA_ARCHIVE:
+    stage_data(DRIVE_DATA_ARCHIVE, DATA_DIR)
 TRAIN_CSV = DATA_DIR / "train.csv"
 TEST_CSV = DATA_DIR / "test.csv"
 SAMPLE_CSV = DATA_DIR / "sample_submission.csv"
@@ -39,10 +64,15 @@ MODEL_NAME = "resnet18"
 IMAGE_SIZE = 224
 BATCH_SIZE = 32
 
-competition = CompetitionConfig(data_dir=DATA_DIR, pretrained_allowed=False)
+competition = CompetitionConfig(
+    data_dir=DATA_DIR,
+    output_dir=paths.output_dir,
+    pretrained_allowed=False,
+)
 training = TrainerConfig(epochs=8, learning_rate=3e-4, metric_name="macro_f1")
 competition.prepare()
 budget = TimeBudget(competition.time_budget_minutes)
+print(gpu_report())
 
 # %% [markdown]
 # ## 1. Inspect before modeling
@@ -78,12 +108,9 @@ valid_ds = ImageTableDataset(
     transform=build_image_transforms(size=IMAGE_SIZE, training=False),
     label_to_index=label_to_index,
 )
-train_loader = DataLoader(
-    train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=competition.num_workers
-)
-valid_loader = DataLoader(
-    valid_ds, batch_size=BATCH_SIZE * 2, shuffle=False, num_workers=competition.num_workers
-)
+loader_options = dataloader_kwargs(competition.device, competition.num_workers)
+train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, **loader_options)
+valid_loader = DataLoader(valid_ds, batch_size=BATCH_SIZE * 2, shuffle=False, **loader_options)
 
 # %% [markdown]
 # ## 3. Model, optimizer, scheduler, checkpoint
@@ -102,6 +129,7 @@ trainer = Trainer(
     device=competition.device,
     metric_fn=lambda y, p: evaluate_metric("macro_f1", y, p),
     time_budget=budget,
+    backup_dir=paths.persistent_dir,
 )
 history = trainer.fit(train_loader, valid_loader)
 print(history[-1])
@@ -116,13 +144,12 @@ test_ds = ImageTableDataset(
     root=DATA_DIR,
     transform=build_image_transforms(size=IMAGE_SIZE, training=False),
 )
-test_loader = DataLoader(
-    test_ds, batch_size=BATCH_SIZE * 2, shuffle=False, num_workers=competition.num_workers
-)
+test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE * 2, shuffle=False, **loader_options)
 logits = predict_logits(model, test_loader, device=competition.device)
 labels = [index_to_label[index] for index in logits.argmax(axis=1)]
 submission = build_submission(sample, {TARGET_COLUMN: labels})
 write_submission(
     submission, competition.output_dir / "submission.csv", sample=sample, id_columns=ID_COLUMN
 )
+sync_artifacts(paths.output_dir, paths.persistent_dir)
 submission.head()

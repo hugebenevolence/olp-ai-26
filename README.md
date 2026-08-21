@@ -25,6 +25,39 @@ uv sync --group dev --group cv-extra --group nlp-extra --group notebook
 `tracking`, `fast-data`, and `audio` are separate groups because they are not required by the
 baseline path and materially increase setup time.
 
+## Google Colab Pro
+
+The generated notebooks target the hosted Colab GPU runtime. Current pin-able 2026 Colab
+runtimes use Python 3.12 and PyTorch 2.9-2.11, so do **not** run `uv sync` inside Colab: the local
+lock may replace Google's CUDA-matched PyTorch build. See the official
+[runtime-version list](https://research.google.com/colaboratory/runtime-version-faq.html).
+
+1. Select **Runtime → Change runtime type → GPU**.
+2. Upload or clone this repository to `/content/olp-ai-26`.
+3. Open one of the generated `.ipynb` files and run its Colab bootstrap cell.
+4. Set `DRIVE_DATA_ARCHIVE` to a `.zip`/`.tar.gz` on Drive, or upload the extracted data directly
+   to `/content/olp_runtime/data`.
+5. Optionally set `PERSISTENT_DIR` to a Drive folder for best-checkpoint and submission backups.
+
+The bootstrap adds the repository's `src/` directory directly to `sys.path`; it does not build or
+install the project. This preserves Colab's PyTorch, torchvision, NumPy, and CUDA stack and avoids
+downloading the `uv_build` backend. It installs only the small packages in
+`requirements-colab.txt` when they are missing.
+
+Training and repeated media reads happen under `/content`, not Google Drive. Only checkpoints,
+submissions, configurations, and reports are copied back to `PERSISTENT_DIR`. This avoids the
+Drive latency and I/O failure mode described in the official
+[Colab FAQ](https://research.google.com/colaboratory/faq.html).
+
+Mixed precision is hardware-aware:
+
+- BF16 when `torch.cuda.is_bf16_supported()` is true.
+- FP16 plus gradient scaling on older GPUs such as T4.
+- Disabled automatically on CPU.
+
+Always inspect the output of `gpu_report()` at the beginning of the session. Colab Pro improves
+access, but Google does not guarantee a particular GPU type or fixed resource limits.
+
 ## First 45 minutes of a contest
 
 1. Read the task, metric, model allowlist, submission limit, and private-test procedure.
@@ -41,6 +74,7 @@ baseline path and materially increase setup time.
 ### Shared core
 
 - `core.config`: reproducibility, device resolution, trainer settings, and wall-clock budget.
+- `core.colab`: `/content` staging, GPU reporting, precision flags, Drive backup, and loaders.
 - `core.inspect`: table/media inventory, corrupt-image detection, duplicate hashes, environment report.
 - `core.split`: random, stratified, grouped, stratified-grouped, and chronological holdouts.
 - `core.metrics`: accuracy/F1, seqeval F1, regression, Dice/IoU, BLEU/chrF, ROUGE-L,

@@ -43,6 +43,8 @@ def percent_script_to_notebook(source: Path | str, destination: Path | str) -> P
     notebook = {
         "cells": cells,
         "metadata": {
+            "accelerator": "GPU",
+            "colab": {"provenance": []},
             "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
             "language_info": {"name": "python", "version": "3.12"},
         },

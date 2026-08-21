@@ -20,6 +20,8 @@ def test_configs_validate_and_resolve_paths(tmp_path):
     assert config.device == "cpu"
     with pytest.raises(ValueError):
         TrainerConfig(epochs=0)
+    with pytest.raises(ValueError):
+        TrainerConfig(mixed_precision="invalid")  # type: ignore[arg-type]
 
 
 def test_time_budget_reserve():

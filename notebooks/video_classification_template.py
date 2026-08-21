@@ -2,13 +2,29 @@
 # # Video / sign-language / activity-recognition baseline
 # Start with sampled frames and a shared 2D CNN. Move to a 3D model only after this submits.
 
+# %% [markdown]
+# ## Colab bootstrap
+
 # %%
+import sys
 from pathlib import Path
 
+PROJECT_ROOT = Path("/content/olp-ai-26") if "google.colab" in sys.modules else Path.cwd()
+exec((PROJECT_ROOT / "notebooks" / "_colab_bootstrap.py").read_text(encoding="utf-8"))
+
+# %%
 import pandas as pd
 from torch import nn
 from torch.utils.data import DataLoader
 
+from olp_ai_26.core.colab import (
+    ColabPaths,
+    dataloader_kwargs,
+    gpu_report,
+    mount_google_drive,
+    stage_data,
+    sync_artifacts,
+)
 from olp_ai_26.core.config import CompetitionConfig, TimeBudget, TrainerConfig
 from olp_ai_26.core.inference import predict_logits
 from olp_ai_26.core.metrics import evaluate_metric
@@ -22,7 +38,14 @@ from olp_ai_26.cv.video_classification import TemporalPoolingClassifier, VideoTa
 # ## 0. Drag-and-plug configuration
 
 # %%
-DATA_DIR = Path("data")
+DRIVE_DATA_ARCHIVE = None  # or Path("/content/drive/MyDrive/olpai26/data.zip")
+PERSISTENT_DIR = None  # or Path("/content/drive/MyDrive/olpai26/video")
+if DRIVE_DATA_ARCHIVE or PERSISTENT_DIR:
+    mount_google_drive()
+paths = ColabPaths.create(persistent_dir=PERSISTENT_DIR)
+DATA_DIR = paths.data_dir
+if DRIVE_DATA_ARCHIVE:
+    stage_data(DRIVE_DATA_ARCHIVE, DATA_DIR)
 VIDEO_COLUMN = "video"
 TARGET_COLUMN = "label"
 ID_COLUMN = "id"
@@ -31,7 +54,12 @@ NUM_FRAMES = 12
 IMAGE_SIZE = 160
 BATCH_SIZE = 4
 
-competition = CompetitionConfig(data_dir=DATA_DIR, pretrained_allowed=False, num_workers=2)
+competition = CompetitionConfig(
+    data_dir=DATA_DIR,
+    output_dir=paths.output_dir,
+    pretrained_allowed=False,
+    num_workers=2,
+)
 training = TrainerConfig(
     epochs=8,
     learning_rate=3e-4,
@@ -40,6 +68,7 @@ training = TrainerConfig(
 )
 competition.prepare()
 budget = TimeBudget(competition.time_budget_minutes)
+print(gpu_report())
 
 # %% [markdown]
 # ## 1. Data, group-aware split, and decoding sanity check
@@ -75,8 +104,9 @@ valid_ds = VideoTableDataset(
     transform=transform,
     label_to_index=label_to_index,
 )
-train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
-valid_loader = DataLoader(valid_ds, batch_size=BATCH_SIZE * 2, shuffle=False, num_workers=2)
+loader_options = dataloader_kwargs(competition.device, competition.num_workers)
+train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, **loader_options)
+valid_loader = DataLoader(valid_ds, batch_size=BATCH_SIZE * 2, shuffle=False, **loader_options)
 
 # %% [markdown]
 # ## 2. Baseline training
@@ -95,6 +125,7 @@ trainer = Trainer(
     device=competition.device,
     metric_fn=lambda y, p: evaluate_metric("macro_f1", y, p),
     time_budget=budget,
+    backup_dir=paths.persistent_dir,
 )
 history = trainer.fit(train_loader, valid_loader)
 print(history[-1])
@@ -110,7 +141,7 @@ test_ds = VideoTableDataset(
     num_frames=NUM_FRAMES,
     transform=transform,
 )
-test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE * 2, shuffle=False, num_workers=2)
+test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE * 2, shuffle=False, **loader_options)
 logits = predict_logits(model, test_loader, device=competition.device)
 predictions = [index_to_label[index] for index in logits.argmax(axis=1)]
 submission = build_submission(sample, {TARGET_COLUMN: predictions})
@@ -120,3 +151,4 @@ write_submission(
     sample=sample,
     id_columns=ID_COLUMN,
 )
+sync_artifacts(paths.output_dir, paths.persistent_dir)

@@ -2,13 +2,29 @@
 # # Translation / seq2seq baseline
 # The local model directory must be explicitly allowed by the problem statement.
 
+# %% [markdown]
+# ## Colab bootstrap
+
 # %%
+import inspect
+import sys
 from pathlib import Path
 
+PROJECT_ROOT = Path("/content/olp-ai-26") if "google.colab" in sys.modules else Path.cwd()
+exec((PROJECT_ROOT / "notebooks" / "_colab_bootstrap.py").read_text(encoding="utf-8"))
+
+# %%
 import pandas as pd
 from datasets import Dataset
 from transformers import DataCollatorForSeq2Seq, Seq2SeqTrainer, Seq2SeqTrainingArguments
 
+from olp_ai_26.core.colab import (
+    ColabPaths,
+    hf_precision_flags,
+    mount_google_drive,
+    stage_data,
+    sync_artifacts,
+)
 from olp_ai_26.core.config import CompetitionConfig
 from olp_ai_26.core.metrics import evaluate_metric
 from olp_ai_26.core.split import make_split
@@ -18,12 +34,23 @@ from olp_ai_26.nlp.seq2seq import build_seq2seq_model, decode_generated, tokeniz
 # ## 0. Drag-and-plug configuration
 
 # %%
-DATA_DIR = Path("data")
-MODEL_DIR = Path("models/allowed_seq2seq_model")
+DRIVE_DATA_ARCHIVE = None  # or Path("/content/drive/MyDrive/olpai26/data.zip")
+PERSISTENT_DIR = None  # or Path("/content/drive/MyDrive/olpai26/seq2seq")
+if DRIVE_DATA_ARCHIVE or PERSISTENT_DIR:
+    mount_google_drive()
+paths = ColabPaths.create(persistent_dir=PERSISTENT_DIR)
+DATA_DIR = paths.data_dir
+if DRIVE_DATA_ARCHIVE:
+    stage_data(DRIVE_DATA_ARCHIVE, DATA_DIR)
+MODEL_DIR = PROJECT_ROOT / "models" / "allowed_seq2seq_model"
 SOURCE_COLUMN = "source"
 TARGET_COLUMN = "target"
 SOURCE_PREFIX = "translate: "
-config = CompetitionConfig(data_dir=DATA_DIR, pretrained_allowed=False)
+config = CompetitionConfig(
+    data_dir=DATA_DIR,
+    output_dir=paths.output_dir,
+    pretrained_allowed=False,
+)
 config.prepare()
 
 # %% [markdown]
@@ -73,8 +100,8 @@ arguments = Seq2SeqTrainingArguments(
     load_best_model_at_end=True,
     metric_for_best_model="bleu",
     greater_is_better=True,
-    fp16=config.device == "cuda",
     report_to="none",
+    **hf_precision_flags(config.device),
 )
 
 
@@ -88,13 +115,19 @@ def compute_metrics(output):
     return {"bleu": evaluate_metric("bleu", target_text, predicted_text)}
 
 
+processor_parameter = (
+    "processing_class"
+    if "processing_class" in inspect.signature(Seq2SeqTrainer.__init__).parameters
+    else "tokenizer"
+)
 trainer = Seq2SeqTrainer(
     model=model,
     args=arguments,
     train_dataset=train_ds,
     eval_dataset=valid_ds,
-    processing_class=tokenizer,
     data_collator=DataCollatorForSeq2Seq(tokenizer, model=model),
     compute_metrics=compute_metrics,
+    **{processor_parameter: tokenizer},
 )
 trainer.train()
+sync_artifacts(config.output_dir, paths.persistent_dir)
