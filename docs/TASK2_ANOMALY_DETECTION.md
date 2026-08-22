@@ -15,6 +15,41 @@ weights, thresholds, and calibration must be frozen and must not be refit from p
 the following numbered item appears to say threshold refitting is possible. The notebook enforces
 the stricter boxed rule. Seek an organizer clarification rather than weakening this safeguard.
 
+The extracted `public_test/README.txt` also asks for a finite real-valued anomaly score, while the
+official PDF explicitly requires binary values in a `label` column. The notebook follows the PDF's
+binary CSV contract. Confirm any later organizer announcement before changing this behavior.
+
+## Actual released archive layout
+
+The official `ThiChinhThucData.zip` is a nested archive:
+
+```text
+ThiChinhThucData.zip
+└── CV_Data
+    ├── training_dataset/dataset_train.zip
+    ├── public_test/public_test.zip
+    └── private_test/private_test.zip  # encrypted until final release
+```
+
+After inner extraction, the usable roots are:
+
+```text
+dataset_train/
+├── train1_6.csv
+├── train2_5.csv
+├── train3_4.csv
+└── train/category_01/...category_06/...
+public_test/
+├── test.csv
+└── images/category_01/...category_06/...
+```
+
+The notebook's `stage_official_task2_data()` helper extracts only the CV train archive and selected
+test phase into fast `/content` storage. It does not unpack the unrelated NLP archive. The private
+ZIP requires `PRIVATE_ZIP_PASSWORD` after the organizer releases it.
+The helper uses `pyzipper` because the supplied private archive uses AES ZIP compression, which
+Python's standard `zipfile` module cannot decrypt.
+
 ## Why this baseline
 
 The supplied training data has no positive labels, so a conventional binary classifier cannot be
@@ -39,7 +74,7 @@ Open `notebooks/image_anomaly_detection_template.ipynb` and change only the conf
 TEAM_NAME = "your_team"
 PHASE = "public"
 RUN_TRAINING = True
-DRIVE_DATA_ARCHIVE = Path("/content/drive/MyDrive/olpai26/task2.zip")
+OFFICIAL_DATA_SOURCE = Path("/content/drive/MyDrive/olpai26/ThiChinhThucData.zip")
 PERSISTENT_DIR = Path("/content/drive/MyDrive/olpai26/task2_artifacts")
 ```
 

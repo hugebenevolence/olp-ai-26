@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import zipfile
+
 import pandas as pd
 import torch
 from PIL import Image
@@ -11,8 +13,10 @@ from olp_ai_26.cv.anomaly_detection import (
     calibrate_anomaly_threshold,
     cutpaste_batch,
     discover_normal_images,
+    load_official_training_table,
     patch_memory_scores,
     sample_memory_bank,
+    stage_official_task2_data,
     validate_anomaly_submission,
 )
 from olp_ai_26.cv.classification import (
@@ -154,3 +158,38 @@ def test_anomaly_submission_contract():
     submission = test[["sample_id", "category"]].copy()
     submission["label"] = [0, 1]
     validate_anomaly_submission(submission, test)
+
+
+def test_stage_official_nested_task2_archive(tmp_path):
+    source_image = tmp_path / "normal.png"
+    Image.new("RGB", (8, 8), color=(1, 2, 3)).save(source_image)
+    train_zip = tmp_path / "dataset_train.zip"
+    with zipfile.ZipFile(train_zip, "w") as archive:
+        for csv_name in ("train1_6.csv", "train2_5.csv", "train3_4.csv"):
+            rows = "sample_id,category,relative_path\n"
+            if csv_name == "train1_6.csv":
+                rows += "normal_1,category_01,train/category_01/normal.png\n"
+            archive.writestr(f"dataset_train/{csv_name}", rows)
+        archive.write(source_image, arcname="dataset_train/train/category_01/normal.png")
+    public_zip = tmp_path / "public_test.zip"
+    with zipfile.ZipFile(public_zip, "w") as archive:
+        archive.writestr(
+            "public_test/test.csv",
+            "sample_id,category,relative_path\ntest_1,category_01,images/category_01/test.png\n",
+        )
+        archive.write(source_image, arcname="public_test/images/category_01/test.png")
+    outer_zip = tmp_path / "official.zip"
+    with zipfile.ZipFile(outer_zip, "w") as archive:
+        archive.write(
+            train_zip,
+            arcname="CV_Data/training_dataset/dataset_train.zip",
+        )
+        archive.write(
+            public_zip,
+            arcname="CV_Data/public_test/public_test.zip",
+        )
+    resolved = stage_official_task2_data(outer_zip, tmp_path / "expanded", phase="public")
+    assert resolved.training_root.name == "dataset_train"
+    assert resolved.test_csv.is_file()
+    training = load_official_training_table(resolved.training_root)
+    assert training["sample_id"].tolist() == ["normal_1"]

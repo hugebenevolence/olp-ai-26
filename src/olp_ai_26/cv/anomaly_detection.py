@@ -6,7 +6,10 @@ feature memory bank and one decision threshold per category. Higher scores mean 
 
 from __future__ import annotations
 
+import shutil
+import zipfile
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +24,160 @@ from torch.utils.data import Dataset
 from torchvision.transforms import v2
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+
+
+@dataclass(frozen=True)
+class OfficialTask2Paths:
+    """Resolved roots created from the official nested competition archive."""
+
+    training_root: Path
+    test_root: Path
+    test_csv: Path
+
+
+def _safe_extract_zip(archive: Path, destination: Path, *, password: str | None = None) -> None:
+    """Extract a ZIP after rejecting traversal and unavailable encrypted members."""
+    destination.mkdir(parents=True, exist_ok=True)
+    root = destination.resolve()
+    with zipfile.ZipFile(archive) as inspection:
+        uses_aes = any(member.compress_type == 99 for member in inspection.infolist())
+    if uses_aes:
+        if not password:
+            raise RuntimeError(
+                f"{archive.name} uses AES encryption. Set PRIVATE_ZIP_PASSWORD after release."
+            )
+        import pyzipper
+
+        source_context = pyzipper.AESZipFile(archive)
+    else:
+        source_context = zipfile.ZipFile(archive)
+    with source_context as source:
+        members = source.infolist()
+        if any(member.flag_bits & 0x1 for member in members) and not password:
+            raise RuntimeError(
+                f"{archive.name} is encrypted. Set PRIVATE_ZIP_PASSWORD to the organizer password."
+            )
+        for member in members:
+            target = (destination / member.filename).resolve()
+            if not target.is_relative_to(root):
+                raise ValueError(f"Unsafe path inside {archive}: {member.filename}")
+        source.extractall(destination, pwd=password.encode() if password else None)
+
+
+def _copy_nested_archive(outer_archive: Path, member_suffix: str, destination: Path) -> Path:
+    """Copy one uniquely named inner ZIP from the official outer ZIP to fast local storage."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(outer_archive) as source:
+        matches = [
+            item
+            for item in source.infolist()
+            if item.filename.replace("\\", "/").endswith(member_suffix)
+        ]
+        if len(matches) != 1:
+            raise FileNotFoundError(
+                f"Expected exactly one *{member_suffix} in {outer_archive}; found {len(matches)}"
+            )
+        member = matches[0]
+        if destination.exists() and destination.stat().st_size == member.file_size:
+            return destination
+        temporary = destination.with_suffix(destination.suffix + ".tmp")
+        with source.open(member) as input_stream, temporary.open("wb") as output_stream:
+            shutil.copyfileobj(input_stream, output_stream, length=8 * 1024 * 1024)
+        temporary.replace(destination)
+    return destination
+
+
+def stage_official_task2_data(
+    source: Path | str,
+    destination: Path | str,
+    *,
+    phase: str = "public",
+    private_password: str | None = None,
+) -> OfficialTask2Paths:
+    """Resolve the official nested ZIP or an already expanded directory into usable task paths.
+
+    The released outer archive contains ``dataset_train.zip``, ``public_test.zip``, and an
+    encrypted ``private_test.zip``. Only the training and selected phase archives are copied and
+    expanded. Repeated calls reuse existing extracted directories.
+    """
+    if phase not in {"public", "private"}:
+        raise ValueError("phase must be 'public' or 'private'")
+    source_path = Path(source)
+    destination_path = Path(destination)
+    destination_path.mkdir(parents=True, exist_ok=True)
+
+    # Accept a directory that is already expanded by the participant.
+    directory_candidates = [source_path, source_path / "expanded"] if source_path.is_dir() else []
+    for candidate in directory_candidates:
+        training_root = candidate / "dataset_train"
+        test_root = candidate / f"{phase}_test"
+        test_csv = test_root / "test.csv"
+        if (training_root / "train").is_dir() and test_csv.is_file():
+            return OfficialTask2Paths(training_root, test_root, test_csv)
+
+    training_root = destination_path / "dataset_train"
+    test_root = destination_path / f"{phase}_test"
+    test_csv = test_root / "test.csv"
+    if (training_root / "train").is_dir() and test_csv.is_file():
+        return OfficialTask2Paths(training_root, test_root, test_csv)
+
+    archive_dir = destination_path / "_archives"
+    if source_path.is_file() and source_path.suffix.lower() == ".zip":
+        train_archive = _copy_nested_archive(
+            source_path,
+            "CV_Data/training_dataset/dataset_train.zip",
+            archive_dir / "dataset_train.zip",
+        )
+        test_archive = _copy_nested_archive(
+            source_path,
+            f"CV_Data/{phase}_test/{phase}_test.zip",
+            archive_dir / f"{phase}_test.zip",
+        )
+    elif source_path.is_dir():
+        train_matches = list(source_path.rglob("dataset_train.zip"))
+        test_matches = list(source_path.rglob(f"{phase}_test.zip"))
+        if len(train_matches) != 1 or len(test_matches) != 1:
+            raise FileNotFoundError(
+                "Could not uniquely locate dataset_train.zip and the selected test ZIP"
+            )
+        train_archive, test_archive = train_matches[0], test_matches[0]
+    else:
+        raise FileNotFoundError(
+            f"Official data source not found: {source_path}. Point OFFICIAL_DATA_SOURCE at "
+            "ThiChinhThucData.zip or an expanded CV directory."
+        )
+
+    if not (training_root / "train").is_dir():
+        _safe_extract_zip(train_archive, destination_path)
+    if not test_csv.is_file():
+        _safe_extract_zip(
+            test_archive,
+            destination_path,
+            password=private_password if phase == "private" else None,
+        )
+    if not (training_root / "train").is_dir() or not test_csv.is_file():
+        raise RuntimeError("Official task archives extracted without the expected roots")
+    return OfficialTask2Paths(training_root, test_root, test_csv)
+
+
+def load_official_training_table(training_root: Path | str) -> pd.DataFrame:
+    """Load and validate the three authoritative task training CSV files."""
+    root = Path(training_root)
+    csv_paths = sorted(root.glob("train*.csv"))
+    if [path.name for path in csv_paths] != ["train1_6.csv", "train2_5.csv", "train3_4.csv"]:
+        raise FileNotFoundError(
+            f"Expected train1_6.csv, train2_5.csv, and train3_4.csv under {root}"
+        )
+    frame = pd.concat((pd.read_csv(path) for path in csv_paths), ignore_index=True)
+    expected_columns = ["sample_id", "category", "relative_path"]
+    if list(frame.columns) != expected_columns:
+        raise ValueError(f"Training CSV columns must be exactly {expected_columns}")
+    if frame["sample_id"].duplicated().any():
+        raise ValueError("Training CSV files contain duplicate sample_id values")
+    missing = [path for path in frame["relative_path"] if not (root / str(path)).is_file()]
+    if missing:
+        raise FileNotFoundError(f"Training CSV references {len(missing)} missing images")
+    return frame.sort_values(["category", "sample_id"]).reset_index(drop=True)
 
 
 def discover_normal_images(train_root: Path | str) -> pd.DataFrame:

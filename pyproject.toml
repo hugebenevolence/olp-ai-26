@@ -35,6 +35,7 @@ dev = [
 ]
 cv-extra = [
     "albumentations>=2.0",
+    "pyzipper>=0.4,<0.5",
     "segmentation-models-pytorch>=0.4",
     "ultralytics>=8.3",
 ]

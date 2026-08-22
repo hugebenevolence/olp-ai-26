@@ -31,7 +31,6 @@ from olp_ai_26.core.colab import (
     dataloader_kwargs,
     gpu_report,
     mount_google_drive,
-    stage_data,
     sync_artifacts,
 )
 from olp_ai_26.core.config import seed_everything
@@ -42,9 +41,10 @@ from olp_ai_26.cv.anomaly_detection import (
     TimmPatchFeatureExtractor,
     calibrate_anomaly_threshold,
     cutpaste_batch,
-    discover_normal_images,
+    load_official_training_table,
     patch_memory_scores,
     sample_memory_bank,
+    stage_official_task2_data,
     validate_anomaly_submission,
 )
 
@@ -63,17 +63,27 @@ TASK_NAME = "task2"
 PHASE = "public"  # public | private
 RUN_TRAINING = True
 
-DRIVE_DATA_ARCHIVE = None  # e.g. Path("/content/drive/MyDrive/olpai26/task2.zip")
+OFFICIAL_DATA_SOURCE = (
+    Path("/content/drive/MyDrive/olpai26/ThiChinhThucData.zip")
+    if "google.colab" in sys.modules
+    else Path.home() / "Downloads" / "ThiChinhThucData.zip"
+)
 PERSISTENT_DIR = None  # e.g. Path("/content/drive/MyDrive/olpai26/task2_artifacts")
-if DRIVE_DATA_ARCHIVE or PERSISTENT_DIR:
+PRIVATE_ZIP_PASSWORD = None  # set only after the organizer releases it in the final hour
+if "google.colab" in sys.modules and (
+    str(OFFICIAL_DATA_SOURCE).startswith("/content/drive") or PERSISTENT_DIR
+):
     mount_google_drive()
 paths = ColabPaths.create(persistent_dir=PERSISTENT_DIR)
-if DRIVE_DATA_ARCHIVE:
-    stage_data(DRIVE_DATA_ARCHIVE, paths.data_dir)
-
-TRAIN_ROOT = paths.data_dir / "dataset" / "train"
-TEST_ROOT = paths.data_dir / ("public_test" if PHASE == "public" else "private_test")
-TEST_CSV = TEST_ROOT / "test.csv"
+official_paths = stage_official_task2_data(
+    OFFICIAL_DATA_SOURCE,
+    paths.data_dir / "task2_extracted",
+    phase=PHASE,
+    private_password=PRIVATE_ZIP_PASSWORD,
+)
+TRAIN_ROOT = official_paths.training_root
+TEST_ROOT = official_paths.test_root
+TEST_CSV = official_paths.test_csv
 BUNDLE_PATH = (
     paths.output_dir / "task2_anomaly_bundle.pt"
     if RUN_TRAINING or paths.persistent_dir is None
@@ -112,7 +122,7 @@ print(dataset_report(paths.data_dir, image_limit=100)["counts"])
 # a silent path error can otherwise look like a surprisingly fast training run.
 
 # %%
-train_table = discover_normal_images(TRAIN_ROOT)
+train_table = load_official_training_table(TRAIN_ROOT)
 test_table = pd.read_csv(TEST_CSV)
 required_test_columns = ["sample_id", "category", "relative_path"]
 if list(test_table.columns) != required_test_columns:
@@ -142,6 +152,10 @@ if actual_test_counts != expected_test_counts:
 print("Train counts:\n", train_table["category"].value_counts().sort_index())
 print("Test counts:\n", test_table["category"].value_counts().sort_index())
 print(test_table.head())
+
+# The extracted public README asks for a real-valued anomaly score, but the official problem PDF
+# requires binary values in the `label` column. This notebook follows the PDF contract. Confirm any
+# later organizer clarification before changing the final submission serializer.
 
 # %% [markdown]
 # ## 2. Feature extractor and reusable scoring helpers

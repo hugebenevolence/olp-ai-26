@@ -2,6 +2,7 @@
 # These are the small packages used by the baseline notebooks that are not always preinstalled.
 timm>=1.0,<2
 segmentation-models-pytorch>=0.4,<0.6
+pyzipper>=0.4,<0.5
 transformers>=4.45,<6
 datasets>=3,<5
 accelerate>=1,<2

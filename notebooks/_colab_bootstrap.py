@@ -20,6 +20,7 @@ if IN_COLAB:
     required_modules = (
         "accelerate",
         "datasets",
+        "pyzipper",
         "segmentation_models_pytorch",
         "timm",
         "transformers",
