@@ -114,6 +114,13 @@ head to isolate the backbone/scoring change. See
 [`TASK2_ANOMALYDINO_RESEARCH.md`](TASK2_ANOMALYDINO_RESEARCH.md) for the primary-source comparison,
 gap table, and known departures from the paper.
 
+After recording the 0.719 DINO-only result, use
+`notebooks/image_anomaly_detection_dino_augmented_template.ipynb` for the separate normal-
+augmentation experiment. It preserves all 32,768 clean patches and adds a distinct 16,384-patch
+augmented bank, preventing transformed patches from displacing the clean reference memory. Its
+`AUGMENTATION_PROFILE` switch selects the complete prior category policy or the narrower blur-only
+ablation. Synthetic defects remain disabled in this notebook.
+
 Every category configuration stores `model_name`, `image_size`, `batch_size`,
 `max_memory_patches`, `top_k`, `normal_augmentations`, `synthetic_anomalies`, `normal_quantile`,
 `threshold_mode`, `threshold_scale`, `positive_evidence_weight`, and
