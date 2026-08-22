@@ -166,6 +166,19 @@ def test_anomaly_feature_memory_and_calibration(tmp_path):
     mixed = apply_synthetic_anomaly(mixup_input, "mixup", seed=42)
     assert torch.all((mixed > 0) & (mixed < 1))
     assert not torch.equal(mixed, mixup_input)
+    weak_mix = apply_synthetic_anomaly(
+        mixup_input, "mixup", seed=42, mixup_alpha_range=(0.10, 0.10)
+    )
+    strong_mix = apply_synthetic_anomaly(
+        mixup_input, "mixup", seed=42, mixup_alpha_range=(0.45, 0.45)
+    )
+    assert torch.mean(torch.abs(strong_mix - mixup_input)) > torch.mean(
+        torch.abs(weak_mix - mixup_input)
+    )
+    curve_source = torch.ones(2, 3, 32, 32)
+    light_curve = apply_synthetic_anomaly(curve_source, "dark_curve", seed=42, curve_darkness=0.20)
+    dark_curve = apply_synthetic_anomaly(curve_source, "dark_curve", seed=42, curve_darkness=0.90)
+    assert dark_curve.mean() < light_curve.mean()
 
 
 def test_anomaly_submission_contract():

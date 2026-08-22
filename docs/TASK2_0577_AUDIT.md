@@ -4,6 +4,19 @@ This audit uses the executed outputs in `image_anomaly_detection_template.ipynb`
 public submission. The reported public score is `0.577`. Synthetic proxy accuracy is not treated
 as hidden-label evidence.
 
+## Supplied v2 log: 0.590
+
+The later executed `image_anomaly_detection_template (1).ipynb` is still the original
+single-backbone implementation: one `wide_resnet50_2`, 256-pixel input, identity-only normal
+memory, 4,096 patches, top-3 scoring, and CutPaste-only calibration. It does **not** execute the
+new category-specific models or augmentation policies.
+
+Its public output predicted 33 anomalies out of 480, distributed `3, 10, 1, 3, 7, 9` across
+categories 01-06. The user reports an official score of `0.590`. Numerically, 0.590 is higher than
+the earlier reported 0.577; if it is considered worse, the comparison target must be a different
+unrecorded run. Either way, the v2 result cannot diagnose the newer augmentation design because
+that code was absent from the executed notebook.
+
 ## Reproduction gap table
 
 | Component | Executed 0.577 run | Evidence | Gap | Revision type |

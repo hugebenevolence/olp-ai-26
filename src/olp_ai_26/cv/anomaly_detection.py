@@ -413,6 +413,11 @@ def apply_synthetic_anomaly(
     name: str,
     *,
     seed: int = 42,
+    cutpaste_area_range: tuple[float, float] = (0.03, 0.15),
+    mixup_alpha_range: tuple[float, float] = (0.25, 0.45),
+    blur_sigma: float = 2.5,
+    curve_width_fraction: float = 0.025,
+    curve_darkness: float = 0.85,
 ) -> torch.Tensor:
     """Create one deterministic synthetic anomaly from official normal images.
 
@@ -424,6 +429,11 @@ def apply_synthetic_anomaly(
         images: Float image batch shaped ``[B,C,H,W]`` with values in the 0-1 range.
         name: One of :data:`SYNTHETIC_ANOMALIES`.
         seed: Reproducibility seed for CutPaste, MixUp pairing, and curve geometry.
+        cutpaste_area_range: Minimum and maximum pasted fraction of image area.
+        mixup_alpha_range: Minimum and maximum contribution from the random partner image.
+        blur_sigma: Gaussian blur standard deviation in pixels.
+        curve_width_fraction: Approximate full curve width divided by the shorter image side.
+        curve_darkness: Curve opacity, where 0 changes nothing and 1 produces black pixels.
 
     Returns:
         A transformed batch with the same shape, device, and dtype as ``images``.
@@ -432,8 +442,10 @@ def apply_synthetic_anomaly(
         raise ValueError("Expected image batch shaped [B,C,H,W]")
     normalized = name.lower()
     if normalized == "cutpaste":
-        return cutpaste_batch(images, seed=seed)
+        return cutpaste_batch(images, area_range=cutpaste_area_range, seed=seed)
     if normalized == "mixup":
+        if not 0 < mixup_alpha_range[0] <= mixup_alpha_range[1] < 1:
+            raise ValueError("mixup_alpha_range must satisfy 0 < low <= high < 1")
         generator = torch.Generator(device="cpu").manual_seed(seed)
         if len(images) == 1:
             partners = torch.flip(images, (-1,))
@@ -444,22 +456,26 @@ def apply_synthetic_anomaly(
             partner_indices[order] = torch.roll(order, shifts=1)
             partners = images[partner_indices.to(images.device)]
         alpha = torch.empty((len(images), 1, 1, 1)).uniform_(
-            0.25,
-            0.45,
+            *mixup_alpha_range,
             generator=generator,
         )
         alpha = alpha.to(device=images.device, dtype=images.dtype)
         return ((1 - alpha) * images + alpha * partners).clamp(0, 1)
     if normalized == "blur":
-        radius = max(2, min(6, round(min(images.shape[-2:]) / 64)))
+        if blur_sigma <= 0:
+            raise ValueError("blur_sigma must be positive")
+        radius = max(1, min(12, round(2 * blur_sigma)))
         kernel_size = 2 * radius + 1
-        sigma = max(1.0, kernel_size / 4)
         return v2.functional.gaussian_blur(
             images,
             kernel_size=[kernel_size, kernel_size],
-            sigma=[sigma, sigma],
+            sigma=[blur_sigma, blur_sigma],
         )
     if normalized == "dark_curve":
+        if not 0 < curve_width_fraction < 1:
+            raise ValueError("curve_width_fraction must be between zero and one")
+        if not 0 < curve_darkness <= 1:
+            raise ValueError("curve_darkness must be in (0, 1]")
         generator = torch.Generator(device="cpu").manual_seed(seed)
         batch, _, height, width = images.shape
         masks = torch.zeros((batch, 1, height, width), dtype=torch.float32)
@@ -489,10 +505,10 @@ def apply_synthetic_anomaly(
                 + time.square() * y_points[2]
             )
             masks[index, 0, curve_y.round().long(), curve_x.round().long()] = 1
-        radius = max(2, round(min(height, width) * 0.0125))
+        radius = max(1, round(min(height, width) * curve_width_fraction / 2))
         masks = F.max_pool2d(masks, kernel_size=2 * radius + 1, stride=1, padding=radius)
         masks = masks.to(device=images.device, dtype=images.dtype)
-        return images * (1 - 0.85 * masks)
+        return images * (1 - curve_darkness * masks)
     raise ValueError(f"Unknown synthetic anomaly {name!r}; choose {SYNTHETIC_ANOMALIES}")
 
 

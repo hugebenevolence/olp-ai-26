@@ -1,10 +1,10 @@
 # %% [markdown]
 # # Task 2 - category-specialized normal-only anomaly detection
 #
-# The submitted 0.577 run used one `wide_resnet50_2`, identity-only normal memory, and CutPaste
-# calibration for every category. This revision keeps that run as a reproducible preset and adds
-# two controlled experiments: category-specific models, then category-specific limited normal
-# augmentations. Do not manually label public images; use only aggregate PublicScore feedback.
+# The supplied executed runs scoring 0.577 and 0.590 both used one `wide_resnet50_2`, identity-only
+# normal memory, and CutPaste calibration for every category. This revision keeps that design as a
+# preset and adds controlled category specialization plus persisted augmentation evidence. Do not
+# manually label public images; use only aggregate PublicScore feedback.
 
 # %% [markdown]
 # ## Colab bootstrap
@@ -17,6 +17,7 @@ PROJECT_ROOT = Path("/content/olp-ai-26") if "google.colab" in sys.modules else 
 exec((PROJECT_ROOT / "notebooks" / "_colab_bootstrap.py").read_text(encoding="utf-8"))
 
 # %%
+import hashlib
 import json
 import zipfile
 
@@ -25,6 +26,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader
+from torchvision.utils import save_image
 
 from olp_ai_26.core.colab import (
     ColabPaths,
@@ -73,8 +75,14 @@ OFFICIAL_DATA_SOURCE = (
     if "google.colab" in sys.modules
     else Path.home() / "Downloads" / "ThiChinhThucData.zip"
 )
-PERSISTENT_DIR = None  # e.g. Path("/content/drive/MyDrive/olpai26/task2_artifacts")
+PERSISTENT_DIR = (
+    Path("/content/drive/MyDrive/olpai26/task2_artifacts")
+    if "google.colab" in sys.modules
+    else None
+)
 PRIVATE_ZIP_PASSWORD = None
+PERSIST_AUGMENTATION_AUDIT = True
+AUGMENTATION_AUDIT_SAMPLES = 4  # per category; raise carefully because every method writes PNGs
 if "google.colab" in sys.modules and (
     str(OFFICIAL_DATA_SOURCE).startswith("/content/drive") or PERSISTENT_DIR
 ):
@@ -127,6 +135,13 @@ print(dataset_report(paths.data_dir, image_limit=100)["counts"])
 
 # %%
 
+DEFAULT_SYNTHETIC_PARAMETERS = {
+    "cutpaste": {"cutpaste_area_range": (0.03, 0.15)},
+    "mixup": {"mixup_alpha_range": (0.25, 0.45)},
+    "blur": {"blur_sigma": 2.5},
+    "dark_curve": {"curve_width_fraction": 0.025, "curve_darkness": 0.85},
+}
+
 
 def category_config(
     model_name,
@@ -140,8 +155,10 @@ def category_config(
     threshold_mode="synthetic",
     threshold_scale=1.0,
     synthetic_anomalies=("cutpaste",),
+    synthetic_parameters=None,
 ):
     """Create one explicit, serializable category experiment configuration."""
+    parameters = synthetic_parameters or DEFAULT_SYNTHETIC_PARAMETERS
     return {
         "model_name": model_name,
         "out_indices": (2, 3),
@@ -156,6 +173,9 @@ def category_config(
         "threshold_scale": threshold_scale,
         "normal_augmentations": tuple(augmentations),
         "synthetic_anomalies": tuple(synthetic_anomalies),
+        "synthetic_parameters": {
+            method: dict(method_parameters) for method, method_parameters in parameters.items()
+        },
     }
 
 
@@ -213,6 +233,14 @@ SYNTHETIC_ANOMALY_POLICIES = {
     "category_05": ("cutpaste", "mixup", "blur", "dark_curve"),
     "category_06": ("cutpaste", "mixup", "blur", "dark_curve"),
 }
+SYNTHETIC_PARAMETERS_BY_CATEGORY = {
+    category: {
+        method: dict(parameters) for method, parameters in DEFAULT_SYNTHETIC_PARAMETERS.items()
+    }
+    for category in CATEGORIES
+}
+# Example per-category severity edit:
+# SYNTHETIC_PARAMETERS_BY_CATEGORY["category_06"]["mixup"]["mixup_alpha_range"] = (0.15, 0.30)
 NORMAL_QUANTILES = {
     "category_01": 0.99,
     "category_02": 0.975,
@@ -226,6 +254,7 @@ CATEGORY_AUGMENTED_CONFIGS = {
         **MODELS_ONLY_CONFIGS[category],
         "normal_augmentations": CATEGORY_AUGMENTATIONS[category],
         "synthetic_anomalies": SYNTHETIC_ANOMALY_POLICIES[category],
+        "synthetic_parameters": SYNTHETIC_PARAMETERS_BY_CATEGORY[category],
         "normal_quantile": NORMAL_QUANTILES[category],
         "threshold_mode": "min_synthetic_quantile",
     }
@@ -285,10 +314,14 @@ PREVIEW_CATEGORY = "category_06"
 SHOW_TRANSFORM_PREVIEW = True
 
 
-def preview_category_transforms(category):
-    """Plot the exact normal and synthetic transforms configured for one category."""
+def preview_category_transforms(category, *, rows=None, save_path=None):
+    """Plot and optionally persist the exact transforms configured for one category."""
     config = CATEGORY_CONFIGS[category]
-    preview_rows = train_table.loc[train_table["category"] == category].head(2)
+    preview_rows = (
+        train_table.loc[train_table["category"] == category].head(2)
+        if rows is None
+        else rows.head(2)
+    )
     preview_batch = torch.stack(
         [
             AnomalyImageDataset(preview_rows, root=TRAIN_ROOT, image_size=config["image_size"])[i]
@@ -304,7 +337,12 @@ def preview_category_transforms(category):
     panels.extend(
         (
             f"synthetic anomaly: {name}",
-            apply_synthetic_anomaly(preview_batch, name, seed=SEED)[0],
+            apply_synthetic_anomaly(
+                preview_batch,
+                name,
+                seed=SEED,
+                **config["synthetic_parameters"].get(name, {}),
+            )[0],
         )
         for name in config["synthetic_anomalies"]
     )
@@ -319,11 +357,108 @@ def preview_category_transforms(category):
         axis.axis("off")
     figure.suptitle(f"{category}: verify before training", fontsize=14)
     figure.tight_layout()
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(save_path, dpi=150, bbox_inches="tight")
     return figure
 
 
 if SHOW_TRANSFORM_PREVIEW:
     preview_category_transforms(PREVIEW_CATEGORY)
+
+# %% [markdown]
+# ## 2.2 Persist augmentation evidence
+#
+# This block saves individual PNGs, one contact sheet per category, the exact method parameters,
+# and a manifest. A configuration hash creates a new folder whenever severity or methods change,
+# so two experiments can be compared without overwriting each other. With the default Drive-backed
+# `PERSISTENT_DIR`, the audit survives a Colab runtime reset.
+
+# %%
+
+
+def export_augmentation_audit():
+    """Persist representative originals/transforms and return their audit manifest."""
+    if AUGMENTATION_AUDIT_SAMPLES < 1:
+        raise ValueError("AUGMENTATION_AUDIT_SAMPLES must be positive")
+    payload = json.dumps(CATEGORY_CONFIGS, sort_keys=True)
+    config_id = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+    audit_root = EXPERIMENT_DIR / "augmentation_audit" / config_id
+    records = []
+    for category in CATEGORIES:
+        config = CATEGORY_CONFIGS[category]
+        category_rows = train_table.loc[train_table["category"] == category]
+        count = min(AUGMENTATION_AUDIT_SAMPLES, len(category_rows))
+        positions = np.linspace(0, len(category_rows) - 1, num=count, dtype=int)
+        selected = category_rows.iloc[positions].reset_index(drop=True)
+        dataset = AnomalyImageDataset(selected, root=TRAIN_ROOT, image_size=config["image_size"])
+        batch_size = min(config["batch_size"], len(dataset))
+        for start in range(0, len(dataset), batch_size):
+            stop = min(start + batch_size, len(dataset))
+            batch_rows = selected.iloc[start:stop].reset_index(drop=True)
+            images = torch.stack([dataset[index] for index in range(start, stop)])
+            transforms = [("original", "identity", images, {})]
+            transforms.extend(
+                ("normal", method, apply_normal_augmentation(images, method), {})
+                for method in config["normal_augmentations"]
+                if method != "identity"
+            )
+            transforms.extend(
+                (
+                    "synthetic_anomaly",
+                    method,
+                    apply_synthetic_anomaly(
+                        images,
+                        method,
+                        seed=SEED + start,
+                        **config["synthetic_parameters"].get(method, {}),
+                    ),
+                    config["synthetic_parameters"].get(method, {}),
+                )
+                for method in config["synthetic_anomalies"]
+            )
+            for transform_type, method, transformed, parameters in transforms:
+                for index, row in batch_rows.iterrows():
+                    output = (
+                        audit_root / category / transform_type / method / f"{row.sample_id}.png"
+                    )
+                    output.parent.mkdir(parents=True, exist_ok=True)
+                    save_image(transformed[index], output)
+                    records.append(
+                        {
+                            "config_id": config_id,
+                            "category": category,
+                            "sample_id": row.sample_id,
+                            "source_relative_path": row.relative_path,
+                            "transform_type": transform_type,
+                            "method": method,
+                            "parameters": json.dumps(parameters, sort_keys=True),
+                            "output_relative_path": output.relative_to(EXPERIMENT_DIR).as_posix(),
+                        }
+                    )
+        figure = preview_category_transforms(
+            category,
+            rows=selected,
+            save_path=audit_root / category / "contact_sheet.png",
+        )
+        plt.close(figure)
+    manifest = pd.DataFrame(records)
+    manifest.to_csv(audit_root / "augmentation_manifest.csv", index=False)
+    (audit_root / "augmentation_config.json").write_text(payload, encoding="utf-8")
+    sync_artifacts(
+        paths.output_dir,
+        paths.persistent_dir,
+        patterns=("*.png", "augmentation_manifest.csv", "augmentation_config.json"),
+    )
+    print("Persisted augmentation audit:", audit_root)
+    return manifest
+
+
+augmentation_manifest = None
+if RUN_TRAINING and PERSIST_AUGMENTATION_AUDIT:
+    augmentation_manifest = export_augmentation_audit()
+    print(augmentation_manifest.head())
 
 # %% [markdown]
 # ## 3. Reusable category training and scoring helpers
@@ -381,6 +516,7 @@ def score_frame(frame, root, extractor, memory_bank, config, *, synthetic_method
                 images,
                 synthetic_method,
                 seed=SEED + batch_index,
+                **config["synthetic_parameters"].get(synthetic_method, {}),
             )
         with torch.autocast(DEVICE, dtype=AMP_DTYPE, enabled=DEVICE == "cuda"):
             embeddings = extractor(images.to(DEVICE)).float()

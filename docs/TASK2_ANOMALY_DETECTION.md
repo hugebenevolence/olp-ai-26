@@ -106,6 +106,42 @@ Every category configuration stores `model_name`, `image_size`, `batch_size`,
 `max_memory_patches`, `top_k`, `normal_augmentations`, `synthetic_anomalies`, `normal_quantile`,
 `threshold_mode`, and `threshold_scale`. Edit one field or one preset at a time.
 
+## Persisted augmentation audit
+
+The notebook defaults to:
+
+```python
+PERSISTENT_DIR = Path("/content/drive/MyDrive/olpai26/task2_artifacts")
+PERSIST_AUGMENTATION_AUDIT = True
+AUGMENTATION_AUDIT_SAMPLES = 4
+```
+
+Before feature extraction it writes originals, every configured normal transform, every synthetic
+anomaly, a contact sheet per category, `augmentation_manifest.csv`, and
+`augmentation_config.json`. The folder name is a 12-character configuration hash, so changing a
+method or severity produces a new comparison folder instead of overwriting the old evidence.
+
+Tune severity through `DEFAULT_SYNTHETIC_PARAMETERS`:
+
+```python
+DEFAULT_SYNTHETIC_PARAMETERS = {
+    "cutpaste": {"cutpaste_area_range": (0.03, 0.15)},
+    "mixup": {"mixup_alpha_range": (0.25, 0.45)},
+    "blur": {"blur_sigma": 2.5},
+    "dark_curve": {"curve_width_fraction": 0.025, "curve_darkness": 0.85},
+}
+```
+
+Inspect the saved PNGs before training. Increasing MixUp alpha, blur sigma, curve width/darkness,
+or CutPaste area makes the corresponding synthetic anomaly more obvious. Synthetic anomalies are
+calibration positives only; do not move them into `normal_augmentations`.
+
+For a single category, override only the relevant nested value:
+
+```python
+SYNTHETIC_PARAMETERS_BY_CATEGORY["category_06"]["mixup"]["mixup_alpha_range"] = (0.15, 0.30)
+```
+
 ## Speed and memory controls
 
 If Colab runs out of memory, reduce the affected category's `batch_size` first. If nearest-neighbor
