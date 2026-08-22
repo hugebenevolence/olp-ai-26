@@ -1,14 +1,13 @@
 # %% [markdown]
-# # Task 2 - normal-only image anomaly detection
+# # Task 2 - category-specialized normal-only anomaly detection
 #
-# This notebook matches the official task: six independent categories, only normal training
-# images, binary image-level output, and macro per-category balanced accuracy. The baseline is a
-# small PatchCore-style system: permitted frozen pretrained features, a normal patch memory bank
-# per category, and thresholds calibrated with held-out normal plus allowed CutPaste anomalies.
+# The submitted 0.577 run used one `wide_resnet50_2`, identity-only normal memory, and CutPaste
+# calibration for every category. This revision keeps that run as a reproducible preset and adds
+# two controlled experiments: category-specific models, then category-specific limited normal
+# augmentations. Do not manually label public images; use only aggregate PublicScore feedback.
 
 # %% [markdown]
 # ## Colab bootstrap
-# Keep repeated image reads under `/content`; Drive is only for input archives and durable outputs.
 
 # %%
 import sys
@@ -21,6 +20,7 @@ exec((PROJECT_ROOT / "notebooks" / "_colab_bootstrap.py").read_text(encoding="ut
 import json
 import zipfile
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
@@ -39,29 +39,34 @@ from olp_ai_26.core.split import make_split
 from olp_ai_26.cv.anomaly_detection import (
     AnomalyImageDataset,
     TimmPatchFeatureExtractor,
+    apply_normal_augmentation,
+    apply_synthetic_anomaly,
     calibrate_anomaly_threshold,
-    cutpaste_batch,
     load_official_training_table,
     patch_memory_scores,
     sample_memory_bank,
+    select_anomaly_threshold,
     stage_official_task2_data,
     validate_anomaly_submission,
 )
 
 # %% [markdown]
-# ## 0. Drag-and-plug configuration
+# ## 0. Run and data configuration
 #
-# Public development: `PHASE="public"`, `RUN_TRAINING=True` for the first run. After choosing a
-# threshold scale from public aggregate feedback, rerun the freeze cell.
+# Recommended public experiment order:
 #
-# Private final: set `PHASE="private"`, `RUN_TRAINING=False`, and point `BUNDLE_PATH` at the frozen
-# public artifact. The notebook refuses to train or calibrate from private data.
+# 1. Keep the submitted `baseline_0577` result as reference; do not spend another submission on it.
+# 2. Run `category_models_only` to isolate the model-choice effect.
+# 3. Run `category_augmented` to measure the added limited-augmentation/calibration effect.
+# 4. Use global threshold candidates only on the better approach.
 
 # %%
 TEAM_NAME = "replace_team_name"
 TASK_NAME = "task2"
 PHASE = "public"  # public | private
 RUN_TRAINING = True
+EXPERIMENT_PRESET = "category_augmented"
+# choices: baseline_0577 | category_models_only | category_augmented
 
 OFFICIAL_DATA_SOURCE = (
     Path("/content/drive/MyDrive/olpai26/ThiChinhThucData.zip")
@@ -69,7 +74,7 @@ OFFICIAL_DATA_SOURCE = (
     else Path.home() / "Downloads" / "ThiChinhThucData.zip"
 )
 PERSISTENT_DIR = None  # e.g. Path("/content/drive/MyDrive/olpai26/task2_artifacts")
-PRIVATE_ZIP_PASSWORD = None  # set only after the organizer releases it in the final hour
+PRIVATE_ZIP_PASSWORD = None
 if "google.colab" in sys.modules and (
     str(OFFICIAL_DATA_SOURCE).startswith("/content/drive") or PERSISTENT_DIR
 ):
@@ -84,42 +89,161 @@ official_paths = stage_official_task2_data(
 TRAIN_ROOT = official_paths.training_root
 TEST_ROOT = official_paths.test_root
 TEST_CSV = official_paths.test_csv
+EXPERIMENT_DIR = paths.output_dir / EXPERIMENT_PRESET
+BUNDLE_NAME = f"task2_{EXPERIMENT_PRESET}_bundle.pt"
 BUNDLE_PATH = (
-    paths.output_dir / "task2_anomaly_bundle.pt"
+    EXPERIMENT_DIR / BUNDLE_NAME
     if RUN_TRAINING or paths.persistent_dir is None
-    else paths.persistent_dir / "task2_anomaly_bundle.pt"
+    else paths.persistent_dir / EXPERIMENT_PRESET / BUNDLE_NAME
 )
 
-MODEL_NAME = "wide_resnet50_2"  # faster: resnet18; middle: resnet50
-MODEL_CHECKPOINT = None  # optional staged local timm checkpoint
-PRETRAINED_ALLOWED = True  # explicitly permitted by this task
-OUT_INDICES = (2, 3)
-IMAGE_SIZE = 256
-BATCH_SIZE = 16
-PROJECTION_DIM = 128
-MAX_MEMORY_PATCHES = 4096  # per category; lower to 2048 for faster inference
-ANOMALY_TOP_K = 3
-NORMAL_VALID_SIZE = 0.20
-NORMAL_QUANTILE = 0.99
-THRESHOLD_SCALE = 1.00  # tune algorithmically from PublicScore; freeze before private
+PRETRAINED_ALLOWED = True  # explicitly permitted by the task
+MODEL_CHECKPOINTS = {
+    "wide_resnet50_2": None,
+    "convnext_tiny": None,
+    "resnet50": None,
+}
 SEED = 42
 NUM_WORKERS = 2
 
 if PHASE not in {"public", "private"}:
     raise ValueError("PHASE must be 'public' or 'private'")
 if PHASE == "private" and RUN_TRAINING:
-    raise ValueError("Private is inference-only: set RUN_TRAINING=False and load the frozen bundle")
+    raise ValueError("Private is inference-only: load a frozen public bundle")
 seed_everything(SEED)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 AMP_DTYPE = torch.bfloat16 if DEVICE == "cuda" and torch.cuda.is_bf16_supported() else torch.float16
 loader_options = dataloader_kwargs(DEVICE, NUM_WORKERS)
+EXPERIMENT_DIR.mkdir(parents=True, exist_ok=True)
 print(gpu_report())
 print(dataset_report(paths.data_dir, image_limit=100)["counts"])
 
 # %% [markdown]
-# ## 1. Inspect official structure
-# Expected train counts are 664, 664, 302, 660, 660, and 210. Stop if categories or paths differ;
-# a silent path error can otherwise look like a surprisingly fast training run.
+# ## 1. Category model and augmentation presets
+#
+# Augmentations expand only the **normal memory bank**. They are deliberately deterministic and
+# mild. Validation/test images remain unaugmented. `normal_quantile` and `threshold_mode` are
+# calibration choices; changes to them are separate from backbone changes.
+
+# %%
+
+
+def category_config(
+    model_name,
+    *,
+    image_size=256,
+    batch_size=16,
+    memory_patches=4096,
+    top_k=3,
+    augmentations=("identity",),
+    normal_quantile=0.99,
+    threshold_mode="synthetic",
+    threshold_scale=1.0,
+    synthetic_anomalies=("cutpaste",),
+):
+    """Create one explicit, serializable category experiment configuration."""
+    return {
+        "model_name": model_name,
+        "out_indices": (2, 3),
+        "image_size": image_size,
+        "batch_size": batch_size,
+        "projection_dim": 128,
+        "max_memory_patches": memory_patches,
+        "top_k": top_k,
+        "normal_valid_size": 0.20,
+        "normal_quantile": normal_quantile,
+        "threshold_mode": threshold_mode,
+        "threshold_scale": threshold_scale,
+        "normal_augmentations": tuple(augmentations),
+        "synthetic_anomalies": tuple(synthetic_anomalies),
+    }
+
+
+CATEGORIES = tuple(f"category_{index:02d}" for index in range(1, 7))
+BASELINE_CONFIGS = {category: category_config("wide_resnet50_2") for category in CATEGORIES}
+
+# Model-only preset: augmentation/calibration stays identical to the 0.577 run.
+MODEL_CHOICES = {
+    "category_01": ("wide_resnet50_2", 288, 12, 6144, 5),
+    "category_02": ("convnext_tiny", 320, 12, 8192, 5),
+    "category_03": ("resnet50", 288, 16, 6144, 5),
+    "category_04": ("wide_resnet50_2", 320, 10, 8192, 5),
+    "category_05": ("resnet50", 288, 16, 6144, 5),
+    "category_06": ("convnext_tiny", 288, 16, 6144, 5),
+}
+MODELS_ONLY_CONFIGS = {
+    category: category_config(
+        model_name,
+        image_size=image_size,
+        batch_size=batch_size,
+        memory_patches=memory_patches,
+        top_k=top_k,
+    )
+    for category, (
+        model_name,
+        image_size,
+        batch_size,
+        memory_patches,
+        top_k,
+    ) in MODEL_CHOICES.items()
+}
+
+# Specialized preset derived from aggregate train/public acquisition statistics and category-level
+# visual structure. These are hypotheses to test, not claimed anomaly labels.
+CATEGORY_AUGMENTATIONS = {
+    "category_01": ("identity", "rot180", "contrast_down", "contrast_up"),
+    "category_02": ("identity", "brightness_down", "brightness_up", "contrast_up"),
+    "category_03": ("identity", "hflip", "vflip", "rot90", "rot270"),
+    "category_04": ("identity", "brightness_down", "brightness_up", "contrast_up"),
+    "category_05": ("identity", "hflip", "vflip", "rot90", "rot270"),
+    "category_06": (
+        "identity",
+        "brightness_down",
+        "brightness_up",
+        "contrast_up",
+        "cool",
+        "warm",
+    ),
+}
+SYNTHETIC_ANOMALY_POLICIES = {
+    "category_01": ("cutpaste", "mixup", "blur", "dark_curve"),
+    "category_02": ("cutpaste", "mixup", "blur", "dark_curve"),
+    "category_03": ("cutpaste", "mixup", "blur", "dark_curve"),
+    "category_04": ("cutpaste", "mixup", "blur", "dark_curve"),
+    "category_05": ("cutpaste", "mixup", "blur", "dark_curve"),
+    "category_06": ("cutpaste", "mixup", "blur", "dark_curve"),
+}
+NORMAL_QUANTILES = {
+    "category_01": 0.99,
+    "category_02": 0.975,
+    "category_03": 0.975,
+    "category_04": 0.975,
+    "category_05": 0.975,
+    "category_06": 0.95,
+}
+CATEGORY_AUGMENTED_CONFIGS = {
+    category: {
+        **MODELS_ONLY_CONFIGS[category],
+        "normal_augmentations": CATEGORY_AUGMENTATIONS[category],
+        "synthetic_anomalies": SYNTHETIC_ANOMALY_POLICIES[category],
+        "normal_quantile": NORMAL_QUANTILES[category],
+        "threshold_mode": "min_synthetic_quantile",
+    }
+    for category in CATEGORIES
+}
+PRESETS = {
+    "baseline_0577": BASELINE_CONFIGS,
+    "category_models_only": MODELS_ONLY_CONFIGS,
+    "category_augmented": CATEGORY_AUGMENTED_CONFIGS,
+}
+try:
+    CATEGORY_CONFIGS = PRESETS[EXPERIMENT_PRESET]
+except KeyError as error:
+    raise ValueError(f"Unknown preset; choose {sorted(PRESETS)}") from error
+print(pd.DataFrame(CATEGORY_CONFIGS).T)
+
+# %% [markdown]
+# ## 2. Validate official tables
 
 # %%
 train_table = load_official_training_table(TRAIN_ROOT)
@@ -139,217 +263,314 @@ expected_train_counts = {
 }
 actual_train_counts = train_table["category"].value_counts().sort_index().to_dict()
 if actual_train_counts != expected_train_counts:
-    raise ValueError(
-        f"Train structure/counts differ from the task statement: {actual_train_counts}"
-    )
-expected_test_per_category = 80 if PHASE == "public" else 160
+    raise ValueError(f"Unexpected training counts: {actual_train_counts}")
+expected_test_count = 80 if PHASE == "public" else 160
 actual_test_counts = test_table["category"].value_counts().sort_index().to_dict()
-expected_test_counts = {category: expected_test_per_category for category in expected_train_counts}
-if actual_test_counts != expected_test_counts:
-    raise ValueError(
-        f"{PHASE} test structure/counts differ from the task statement: {actual_test_counts}"
-    )
+if actual_test_counts != {category: expected_test_count for category in CATEGORIES}:
+    raise ValueError(f"Unexpected {PHASE} counts: {actual_test_counts}")
 print("Train counts:\n", train_table["category"].value_counts().sort_index())
 print("Test counts:\n", test_table["category"].value_counts().sort_index())
-print(test_table.head())
 
-# The extracted public README asks for a real-valued anomaly score, but the official problem PDF
-# requires binary values in the `label` column. This notebook follows the PDF contract. Confirm any
-# later organizer clarification before changing the final submission serializer.
+# The archive README says real-valued score while the official PDF says binary label. This notebook
+# keeps scores for audit but follows the PDF's binary submission contract pending clarification.
 
 # %% [markdown]
-# ## 2. Feature extractor and reusable scoring helpers
-# The encoder is frozen. "Training" fits category-specific normal memory banks and thresholds.
+# ## 2.1 Preview one category's configured transformations
+#
+# Normal-memory transforms and synthetic anomalies are shown in separate rows conceptually and
+# are never mixed in training. Change `PREVIEW_CATEGORY` and rerun this cell before a full run.
 
 # %%
-extractor = (
-    TimmPatchFeatureExtractor(
-        MODEL_NAME,
-        out_indices=OUT_INDICES,
-        projection_dim=PROJECTION_DIM,
-        pretrained_allowed=PRETRAINED_ALLOWED and RUN_TRAINING,
-        checkpoint_path=MODEL_CHECKPOINT if RUN_TRAINING else None,
-        seed=SEED,
+PREVIEW_CATEGORY = "category_06"
+SHOW_TRANSFORM_PREVIEW = True
+
+
+def preview_category_transforms(category):
+    """Plot the exact normal and synthetic transforms configured for one category."""
+    config = CATEGORY_CONFIGS[category]
+    preview_rows = train_table.loc[train_table["category"] == category].head(2)
+    preview_batch = torch.stack(
+        [
+            AnomalyImageDataset(preview_rows, root=TRAIN_ROOT, image_size=config["image_size"])[i]
+            for i in range(len(preview_rows))
+        ]
     )
-    .to(DEVICE)
-    .eval()
-)
+    panels = [("original", preview_batch[0])]
+    panels.extend(
+        (f"normal: {name}", apply_normal_augmentation(preview_batch, name)[0])
+        for name in config["normal_augmentations"]
+        if name != "identity"
+    )
+    panels.extend(
+        (
+            f"synthetic anomaly: {name}",
+            apply_synthetic_anomaly(preview_batch, name, seed=SEED)[0],
+        )
+        for name in config["synthetic_anomalies"]
+    )
+    columns = 4
+    rows = int(np.ceil(len(panels) / columns))
+    figure, axes = plt.subplots(rows, columns, figsize=(4 * columns, 4 * rows))
+    for axis, (title, image) in zip(np.asarray(axes).reshape(-1), panels, strict=False):
+        axis.imshow(image.permute(1, 2, 0).clamp(0, 1))
+        axis.set_title(title)
+        axis.axis("off")
+    for axis in np.asarray(axes).reshape(-1)[len(panels) :]:
+        axis.axis("off")
+    figure.suptitle(f"{category}: verify before training", fontsize=14)
+    figure.tight_layout()
+    return figure
+
+
+if SHOW_TRANSFORM_PREVIEW:
+    preview_category_transforms(PREVIEW_CATEGORY)
+
+# %% [markdown]
+# ## 3. Reusable category training and scoring helpers
+
+# %%
+
+
+def extractor_key(config):
+    """Create a stable key so identical backbone/projection states are stored only once."""
+    payload = {key: config[key] for key in ("model_name", "out_indices", "projection_dim")}
+    payload["seed"] = SEED
+    return json.dumps(payload, sort_keys=True)
+
+
+def build_extractor(config, *, load_pretrained):
+    """Build one configured frozen feature extractor on the active device."""
+    checkpoint = MODEL_CHECKPOINTS.get(config["model_name"])
+    return (
+        TimmPatchFeatureExtractor(
+            config["model_name"],
+            out_indices=tuple(config["out_indices"]),
+            projection_dim=config["projection_dim"],
+            pretrained_allowed=PRETRAINED_ALLOWED and load_pretrained,
+            checkpoint_path=checkpoint if load_pretrained else None,
+            seed=SEED,
+        )
+        .to(DEVICE)
+        .eval()
+    )
 
 
 @torch.inference_mode()
-def collect_patch_batches(frame, root):
-    """Extract CPU patch batches for fitting one category memory bank."""
-    dataset = AnomalyImageDataset(frame, root=root, image_size=IMAGE_SIZE)
-    loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False, **loader_options)
-    outputs = []
+def iter_normal_patch_batches(frame, root, extractor, config):
+    """Yield augmented normal patch embeddings without accumulating all candidates in RAM."""
+    dataset = AnomalyImageDataset(frame, root=root, image_size=config["image_size"])
+    loader = DataLoader(dataset, batch_size=config["batch_size"], shuffle=False, **loader_options)
     for images in loader:
-        with torch.autocast(DEVICE, dtype=AMP_DTYPE, enabled=DEVICE == "cuda"):
-            outputs.append(extractor(images.to(DEVICE)).float().cpu())
-    return outputs
+        images = images.to(DEVICE)
+        for augmentation in config["normal_augmentations"]:
+            transformed = apply_normal_augmentation(images, augmentation)
+            with torch.autocast(DEVICE, dtype=AMP_DTYPE, enabled=DEVICE == "cuda"):
+                yield extractor(transformed).float().cpu()
 
 
 @torch.inference_mode()
-def score_frame(frame, root, memory_bank, synthetic=False):
-    """Score table rows in order, optionally after deterministic CutPaste corruption."""
-    dataset = AnomalyImageDataset(frame, root=root, image_size=IMAGE_SIZE)
-    loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False, **loader_options)
-    memory_bank = memory_bank.to(DEVICE)
+def score_frame(frame, root, extractor, memory_bank, config, *, synthetic_method=None):
+    """Score table rows in order using deterministic validation/test preprocessing."""
+    dataset = AnomalyImageDataset(frame, root=root, image_size=config["image_size"])
+    loader = DataLoader(dataset, batch_size=config["batch_size"], shuffle=False, **loader_options)
+    bank = memory_bank.to(DEVICE)
     scores = []
     for batch_index, images in enumerate(loader):
-        if synthetic:
-            images = cutpaste_batch(images, seed=SEED + batch_index)
+        if synthetic_method is not None:
+            images = apply_synthetic_anomaly(
+                images,
+                synthetic_method,
+                seed=SEED + batch_index,
+            )
         with torch.autocast(DEVICE, dtype=AMP_DTYPE, enabled=DEVICE == "cuda"):
             embeddings = extractor(images.to(DEVICE)).float()
-        batch_scores = patch_memory_scores(embeddings, memory_bank, top_k=ANOMALY_TOP_K)
-        scores.extend(batch_scores.cpu().tolist())
+        values = patch_memory_scores(embeddings, bank, top_k=config["top_k"])
+        scores.extend(values.cpu().tolist())
     return np.asarray(scores, dtype=np.float64)
 
 
 # %% [markdown]
-# ## 3. Fit six normal memory banks and calibrate six thresholds
-# The reported balanced accuracy is a **synthetic proxy**, not the hidden official score.
+# ## 4. Fit category memories and calibrate thresholds
+# `proxy_balanced_accuracy` uses synthetic CutPaste positives and is not the official metric.
 
 # %%
-memory_banks = {}
-calibration = {}
+model_states = {}
+category_artifacts = {}
+extractor_cache = {}
 if RUN_TRAINING:
     for category, category_rows in train_table.groupby("category", sort=True):
-        split = make_split(category_rows, valid_size=NORMAL_VALID_SIZE, seed=SEED)
-        patch_batches = collect_patch_batches(split.train, TRAIN_ROOT)
-        bank = sample_memory_bank(patch_batches, max_patches=MAX_MEMORY_PATCHES, seed=SEED)
-        normal_scores = score_frame(split.valid, TRAIN_ROOT, bank)
-        synthetic_scores = score_frame(split.valid, TRAIN_ROOT, bank, synthetic=True)
+        config = CATEGORY_CONFIGS[category]
+        key = extractor_key(config)
+        if key not in extractor_cache:
+            extractor_cache[key] = build_extractor(config, load_pretrained=True)
+            model_states[key] = {
+                name: value.cpu() for name, value in extractor_cache[key].state_dict().items()
+            }
+        extractor = extractor_cache[key]
+        split = make_split(category_rows, valid_size=config["normal_valid_size"], seed=SEED)
+        bank = sample_memory_bank(
+            iter_normal_patch_batches(split.train, TRAIN_ROOT, extractor, config),
+            max_patches=config["max_memory_patches"],
+            seed=SEED,
+        )
+        normal_scores = score_frame(split.valid, TRAIN_ROOT, extractor, bank, config)
+        synthetic_scores = np.concatenate(
+            [
+                score_frame(
+                    split.valid,
+                    TRAIN_ROOT,
+                    extractor,
+                    bank,
+                    config,
+                    synthetic_method=method,
+                )
+                for method in config["synthetic_anomalies"]
+            ]
+        )
         calibrated = calibrate_anomaly_threshold(
             normal_scores,
             synthetic_scores,
-            normal_quantile=NORMAL_QUANTILE,
+            normal_quantile=config["normal_quantile"],
         )
-        memory_banks[category] = bank
-        calibration[category] = {
-            **calibrated,
-            "normal_score_mean": float(normal_scores.mean()),
-            "normal_score_std": float(normal_scores.std()),
-            "normal_validation_images": len(normal_scores),
+        calibrated["selected_threshold"] = select_anomaly_threshold(
+            calibrated, config["threshold_mode"]
+        )
+        calibrated.update(
+            {
+                "normal_score_mean": float(normal_scores.mean()),
+                "normal_score_std": float(normal_scores.std()),
+                "normal_validation_images": len(normal_scores),
+            }
+        )
+        category_artifacts[category] = {
+            "config": config,
+            "model_key": key,
+            "memory_bank": bank,
+            "calibration": calibrated,
         }
-        print(category, calibration[category])
+        print(category, config["model_name"], config["normal_augmentations"], calibrated)
 
 # %% [markdown]
-# ## 4. Freeze the complete artifact
-# This stores the exact encoder weights, random projection, memory banks, thresholds, and selected
-# public threshold scale. Rerun this cell after changing `THRESHOLD_SCALE`, before private opens.
+# ## 5. Freeze or load the complete experiment bundle
 
 # %%
 if RUN_TRAINING:
     bundle = {
-        "config": {
-            "model_name": MODEL_NAME,
-            "out_indices": OUT_INDICES,
-            "image_size": IMAGE_SIZE,
-            "projection_dim": PROJECTION_DIM,
-            "anomaly_top_k": ANOMALY_TOP_K,
-            "threshold_scale": THRESHOLD_SCALE,
-            "seed": SEED,
-        },
-        "extractor_state": {key: value.cpu() for key, value in extractor.state_dict().items()},
-        "memory_banks": memory_banks,
-        "calibration": calibration,
+        "experiment_name": EXPERIMENT_PRESET,
+        "seed": SEED,
+        "model_states": model_states,
+        "categories": category_artifacts,
     }
     torch.save(bundle, BUNDLE_PATH)
-    (paths.output_dir / "task2_calibration.json").write_text(
-        json.dumps(calibration, indent=2), encoding="utf-8"
+    calibration_report = {
+        category: artifact["calibration"] for category, artifact in category_artifacts.items()
+    }
+    (EXPERIMENT_DIR / "task2_calibration.json").write_text(
+        json.dumps(calibration_report, indent=2), encoding="utf-8"
+    )
+    (EXPERIMENT_DIR / "task2_experiment_config.json").write_text(
+        json.dumps(
+            {"experiment_name": EXPERIMENT_PRESET, "categories": CATEGORY_CONFIGS},
+            indent=2,
+        ),
+        encoding="utf-8",
     )
     sync_artifacts(paths.output_dir, paths.persistent_dir)
     print("Frozen bundle:", BUNDLE_PATH)
 else:
     bundle = torch.load(BUNDLE_PATH, map_location="cpu", weights_only=True)
-    frozen = bundle["config"]
-    # Rebuild the architecture without downloading weights, then restore the exact frozen state.
-    extractor = (
-        TimmPatchFeatureExtractor(
-            frozen["model_name"],
-            out_indices=tuple(frozen["out_indices"]),
-            projection_dim=frozen["projection_dim"],
-            pretrained_allowed=False,
-            seed=frozen["seed"],
-        )
-        .to(DEVICE)
-        .eval()
-    )
-    extractor.load_state_dict(bundle["extractor_state"])
-    memory_banks = bundle["memory_banks"]
-    calibration = bundle["calibration"]
-    IMAGE_SIZE = frozen["image_size"]
-    ANOMALY_TOP_K = frozen["anomaly_top_k"]
-    THRESHOLD_SCALE = frozen["threshold_scale"]
-    print("Loaded frozen threshold scale:", THRESHOLD_SCALE)
+    if bundle["experiment_name"] != EXPERIMENT_PRESET:
+        raise ValueError("Loaded bundle experiment does not match EXPERIMENT_PRESET")
+    model_states = bundle["model_states"]
+    category_artifacts = bundle["categories"]
+    print("Loaded frozen categories:", sorted(category_artifacts))
 
 # %% [markdown]
-# ## 5. Public/private inference
-# Inference fits nothing. Predictions are written back to the original `test.csv` row positions.
+# ## 6. Public/private inference
 
 # %%
 all_scores = np.zeros(len(test_table), dtype=np.float64)
 all_labels = np.zeros(len(test_table), dtype=np.int64)
+inference_extractors = {}
 for category, category_rows in test_table.groupby("category", sort=True):
-    if category not in memory_banks:
-        raise KeyError(f"No frozen memory bank for test category {category}")
-    row_scores = score_frame(category_rows, TEST_ROOT, memory_banks[category])
-    threshold = calibration[category]["threshold"] * THRESHOLD_SCALE
+    artifact = category_artifacts[category]
+    config = artifact["config"]
+    key = artifact["model_key"]
+    if key not in inference_extractors:
+        inference_extractors[key] = build_extractor(config, load_pretrained=False)
+        inference_extractors[key].load_state_dict(model_states[key])
+    row_scores = score_frame(
+        category_rows,
+        TEST_ROOT,
+        inference_extractors[key],
+        artifact["memory_bank"],
+        config,
+    )
+    threshold = artifact["calibration"]["selected_threshold"] * config["threshold_scale"]
     positions = category_rows.index.to_numpy()
     all_scores[positions] = row_scores
     all_labels[positions] = (row_scores >= threshold).astype(np.int64)
     print(
         category,
-        {"threshold": threshold, "predicted_anomalies": int((row_scores >= threshold).sum())},
+        {
+            "model": config["model_name"],
+            "threshold": threshold,
+            "predicted_anomalies": int((row_scores >= threshold).sum()),
+        },
     )
 
 audit = test_table.copy()
 audit["anomaly_score"] = all_scores
 audit["label"] = all_labels
-audit.to_csv(paths.output_dir / f"{TASK_NAME}_{PHASE}_scores.csv", index=False)
+audit.to_csv(EXPERIMENT_DIR / f"{TASK_NAME}_{PHASE}_scores.csv", index=False)
 
 # %% [markdown]
-# ## 6. Exact CSV and ZIP contract
-# The ZIP contains exactly one CSV. The audit score file stays outside the submission archive.
+# ## 7. Exact CSV and ZIP writer
 
 # %%
-submission = test_table[["sample_id", "category"]].copy()
-submission["label"] = all_labels
-validate_anomaly_submission(submission, test_table)
-csv_name = f"{TASK_NAME}_{PHASE}_output.csv"
-csv_path = paths.output_dir / csv_name
-submission.to_csv(csv_path, index=False, encoding="utf-8")
-zip_suffix = "pub" if PHASE == "public" else "pri"
-zip_path = paths.output_dir / f"{TEAM_NAME}_{TASK_NAME}_{zip_suffix}.zip"
-with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-    archive.write(csv_path, arcname=csv_name)
-with zipfile.ZipFile(zip_path) as archive:
-    if archive.namelist() != [csv_name]:
-        raise RuntimeError("Submission ZIP must contain exactly the required CSV")
+
+
+def write_submission_candidate(labels, tag="main"):
+    """Write one isolated candidate directory with the exact required CSV/ZIP names."""
+    candidate_dir = EXPERIMENT_DIR / f"candidate_{tag}"
+    candidate_dir.mkdir(parents=True, exist_ok=True)
+    submission = test_table[["sample_id", "category"]].copy()
+    submission["label"] = np.asarray(labels, dtype=np.int64)
+    validate_anomaly_submission(submission, test_table)
+    csv_name = f"{TASK_NAME}_{PHASE}_output.csv"
+    csv_path = candidate_dir / csv_name
+    submission.to_csv(csv_path, index=False, encoding="utf-8")
+    zip_suffix = "pub" if PHASE == "public" else "pri"
+    zip_path = candidate_dir / f"{TEAM_NAME}_{TASK_NAME}_{zip_suffix}.zip"
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.write(csv_path, arcname=csv_name)
+    with zipfile.ZipFile(zip_path) as archive:
+        if archive.namelist() != [csv_name]:
+            raise RuntimeError("Submission ZIP must contain exactly the required CSV")
+    return submission, zip_path
+
+
+submission, zip_path = write_submission_candidate(all_labels)
 sync_artifacts(
     paths.output_dir, paths.persistent_dir, patterns=("*.pt", "*.json", "*.csv", "*.zip")
 )
-print(csv_path, zip_path, submission["label"].value_counts().to_dict())
+print(zip_path, submission["label"].value_counts().to_dict())
 submission.head()
 
 # %% [markdown]
-# ## 7. Public threshold-scale sweep (optional; never run on private)
-# PublicScore may be used to tune algorithmic thresholds, but labels must never be assigned by
-# manual per-image inspection. Generate candidates sparingly within the 20-submission limit, select
-# one scale from aggregate feedback, then rerun the freeze cell so private uses that exact scale.
+# ## 8. Public global threshold candidates
+# Lower scales predict more anomalies. Submit only controlled experiments within the 20-run limit.
 
 # %%
-PUBLIC_SWEEP_SCALES = (0.90, 1.00, 1.10)
+PUBLIC_SWEEP_SCALES = (0.90, 0.95, 1.05)
 if PHASE == "public":
     for scale in PUBLIC_SWEEP_SCALES:
-        candidate = test_table[["sample_id", "category"]].copy()
         candidate_labels = np.zeros(len(test_table), dtype=np.int64)
         for category, rows in test_table.groupby("category", sort=True):
-            threshold = calibration[category]["threshold"] * scale
+            artifact = category_artifacts[category]
+            threshold = artifact["calibration"]["selected_threshold"] * scale
             candidate_labels[rows.index] = (all_scores[rows.index] >= threshold).astype(np.int64)
-        candidate["label"] = candidate_labels
-        validate_anomaly_submission(candidate, test_table)
-        candidate.to_csv(
-            paths.output_dir / f"{TASK_NAME}_public_scale_{scale:.2f}.csv", index=False
+        _, candidate_zip = write_submission_candidate(
+            candidate_labels, tag=f"global_scale_{scale:.2f}"
         )
-    print("Candidate CSVs created; submit only deliberate experiments.")
+        print(candidate_zip)

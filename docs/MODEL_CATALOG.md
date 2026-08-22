@@ -4,11 +4,12 @@ The examples in notebooks are starting points, **not the complete supported set*
 
 ## Normal-only image anomaly detection
 
-The task-specific notebook defaults to `wide_resnet50_2`, the conventional stronger PatchCore
-feature backbone. Use `resnet18` for pipeline debugging or `resnet50` for a middle ground. The
-extractor accepts timm feature backbones; confirm support with
-`list_supported_classifiers("*resnet*")`. Model weights are frozen, while category-specific patch
-memory banks and decision thresholds are learned from the official normal images.
+The task-specific notebook's reproducible 0.577 preset uses `wide_resnet50_2` for all categories.
+Its category-specialized presets also use `resnet50` and `convnext_tiny`. Use `resnet18` for a
+pipeline smoke test. The extractor accepts timm models that support `features_only=True`; ordinary
+classifier discovery is necessary but not sufficient. Confirm a candidate with a no-pretrained
+constructor/forward smoke test before committing a Colab run. Model weights are frozen, while
+category-specific patch memories and thresholds are learned from official normal images.
 
 ## Image classification
 

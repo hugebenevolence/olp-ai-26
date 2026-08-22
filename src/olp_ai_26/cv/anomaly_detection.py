@@ -25,6 +25,30 @@ from torchvision.transforms import v2
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 
+NORMAL_AUGMENTATIONS = (
+    "identity",
+    "hflip",
+    "vflip",
+    "rot90",
+    "rot180",
+    "rot270",
+    "brightness_down",
+    "brightness_up",
+    "contrast_down",
+    "contrast_up",
+    "saturation_down",
+    "saturation_up",
+    "cool",
+    "warm",
+)
+
+SYNTHETIC_ANOMALIES = (
+    "cutpaste",
+    "mixup",
+    "blur",
+    "dark_curve",
+)
+
 
 @dataclass(frozen=True)
 class OfficialTask2Paths:
@@ -298,16 +322,28 @@ def sample_memory_bank(
     max_patches: int = 4096,
     seed: int = 42,
 ) -> torch.Tensor:
-    """Concatenate patch batches and retain a deterministic random memory subset on CPU."""
-    flattened = [batch.detach().float().cpu().flatten(0, 1) for batch in patch_batches]
-    if not flattened:
-        raise ValueError("At least one patch-embedding batch is required")
-    patches = torch.cat(flattened)
-    if len(patches) <= max_patches:
-        return patches.contiguous()
+    """Uniformly sample a bounded patch memory without retaining all candidates.
+
+    Every patch receives a deterministic random priority and only the smallest priorities are
+    retained. This streaming form makes multiple normal augmentations practical on Colab RAM.
+    """
     generator = torch.Generator().manual_seed(seed)
-    indices = torch.randperm(len(patches), generator=generator)[:max_patches]
-    return patches[indices].contiguous()
+    bank: torch.Tensor | None = None
+    priorities: torch.Tensor | None = None
+    for batch in patch_batches:
+        patches = batch.detach().float().cpu().flatten(0, 1)
+        batch_priorities = torch.rand(len(patches), generator=generator)
+        bank = patches if bank is None else torch.cat((bank, patches))
+        priorities = (
+            batch_priorities if priorities is None else torch.cat((priorities, batch_priorities))
+        )
+        if len(bank) > max_patches:
+            keep = priorities.topk(max_patches, largest=False).indices
+            bank = bank[keep]
+            priorities = priorities[keep]
+    if bank is None:
+        raise ValueError("At least one patch-embedding batch is required")
+    return bank.contiguous()
 
 
 def patch_memory_scores(
@@ -372,6 +408,137 @@ def cutpaste_batch(
     return output
 
 
+def apply_synthetic_anomaly(
+    images: torch.Tensor,
+    name: str,
+    *,
+    seed: int = 42,
+) -> torch.Tensor:
+    """Create one deterministic synthetic anomaly from official normal images.
+
+    ``mixup`` blends each image with another image from the same category, ``blur`` removes fine
+    detail, and ``dark_curve`` overlays a thick quadratic curve. These outputs are synthetic
+    positives for calibration only; they must never be inserted into the normal memory bank.
+
+    Args:
+        images: Float image batch shaped ``[B,C,H,W]`` with values in the 0-1 range.
+        name: One of :data:`SYNTHETIC_ANOMALIES`.
+        seed: Reproducibility seed for CutPaste, MixUp pairing, and curve geometry.
+
+    Returns:
+        A transformed batch with the same shape, device, and dtype as ``images``.
+    """
+    if images.ndim != 4:
+        raise ValueError("Expected image batch shaped [B,C,H,W]")
+    normalized = name.lower()
+    if normalized == "cutpaste":
+        return cutpaste_batch(images, seed=seed)
+    if normalized == "mixup":
+        generator = torch.Generator(device="cpu").manual_seed(seed)
+        if len(images) == 1:
+            partners = torch.flip(images, (-1,))
+        else:
+            # Assign every image a random different partner using one randomized cycle.
+            order = torch.randperm(len(images), generator=generator)
+            partner_indices = torch.empty_like(order)
+            partner_indices[order] = torch.roll(order, shifts=1)
+            partners = images[partner_indices.to(images.device)]
+        alpha = torch.empty((len(images), 1, 1, 1)).uniform_(
+            0.25,
+            0.45,
+            generator=generator,
+        )
+        alpha = alpha.to(device=images.device, dtype=images.dtype)
+        return ((1 - alpha) * images + alpha * partners).clamp(0, 1)
+    if normalized == "blur":
+        radius = max(2, min(6, round(min(images.shape[-2:]) / 64)))
+        kernel_size = 2 * radius + 1
+        sigma = max(1.0, kernel_size / 4)
+        return v2.functional.gaussian_blur(
+            images,
+            kernel_size=[kernel_size, kernel_size],
+            sigma=[sigma, sigma],
+        )
+    if normalized == "dark_curve":
+        generator = torch.Generator(device="cpu").manual_seed(seed)
+        batch, _, height, width = images.shape
+        masks = torch.zeros((batch, 1, height, width), dtype=torch.float32)
+        steps = max(height, width) * 2
+        time = torch.linspace(0, 1, steps)
+        for index in range(batch):
+            horizontal = bool(torch.randint(2, (1,), generator=generator).item())
+            if horizontal:
+                x_points = torch.tensor(
+                    [0.0, float(width // 2), float(width - 1)], dtype=torch.float32
+                )
+                y_points = torch.randint(height, (3,), generator=generator).float()
+            else:
+                x_points = torch.randint(width, (3,), generator=generator).float()
+                y_points = torch.tensor(
+                    [0.0, float(height // 2), float(height - 1)], dtype=torch.float32
+                )
+            one_minus = 1 - time
+            curve_x = (
+                one_minus.square() * x_points[0]
+                + 2 * one_minus * time * x_points[1]
+                + time.square() * x_points[2]
+            )
+            curve_y = (
+                one_minus.square() * y_points[0]
+                + 2 * one_minus * time * y_points[1]
+                + time.square() * y_points[2]
+            )
+            masks[index, 0, curve_y.round().long(), curve_x.round().long()] = 1
+        radius = max(2, round(min(height, width) * 0.0125))
+        masks = F.max_pool2d(masks, kernel_size=2 * radius + 1, stride=1, padding=radius)
+        masks = masks.to(device=images.device, dtype=images.dtype)
+        return images * (1 - 0.85 * masks)
+    raise ValueError(f"Unknown synthetic anomaly {name!r}; choose {SYNTHETIC_ANOMALIES}")
+
+
+def apply_normal_augmentation(images: torch.Tensor, name: str) -> torch.Tensor:
+    """Apply one deterministic, mild normal-data augmentation to a tensor batch.
+
+    These transforms expand the normal memory bank; they do not create positive anomaly labels.
+    Geometric transforms should only be enabled when the category naturally contains that
+    orientation. Photometric factors stay within roughly eight percent of the original.
+    """
+    if images.ndim != 4:
+        raise ValueError("Expected image batch shaped [B,C,H,W]")
+    normalized = name.lower()
+    if normalized == "identity":
+        return images
+    if normalized == "hflip":
+        return torch.flip(images, (-1,))
+    if normalized == "vflip":
+        return torch.flip(images, (-2,))
+    if normalized == "rot90":
+        return torch.rot90(images, 1, (-2, -1))
+    if normalized == "rot180":
+        return torch.rot90(images, 2, (-2, -1))
+    if normalized == "rot270":
+        return torch.rot90(images, 3, (-2, -1))
+    if normalized in {"brightness_down", "brightness_up"}:
+        factor = 0.95 if normalized.endswith("down") else 1.05
+        return (images * factor).clamp(0, 1)
+    if normalized in {"contrast_down", "contrast_up"}:
+        factor = 0.92 if normalized.endswith("down") else 1.08
+        mean = images.mean(dim=(-2, -1), keepdim=True)
+        return ((images - mean) * factor + mean).clamp(0, 1)
+    if normalized in {"saturation_down", "saturation_up"}:
+        factor = 0.95 if normalized.endswith("down") else 1.05
+        gray = images.mean(dim=1, keepdim=True)
+        return ((images - gray) * factor + gray).clamp(0, 1)
+    if normalized in {"cool", "warm"}:
+        factors = (
+            torch.tensor((0.98, 1.00, 1.02), device=images.device, dtype=images.dtype)
+            if normalized == "cool"
+            else torch.tensor((1.02, 1.00, 0.98), device=images.device, dtype=images.dtype)
+        )
+        return (images * factors.view(1, 3, 1, 1)).clamp(0, 1)
+    raise ValueError(f"Unknown normal augmentation {name!r}; choose {NORMAL_AUGMENTATIONS}")
+
+
 def calibrate_anomaly_threshold(
     normal_scores: Iterable[float],
     synthetic_scores: Iterable[float] | None = None,
@@ -415,6 +582,27 @@ def calibrate_anomaly_threshold(
     result["threshold"] = float(candidates[index])
     result["proxy_balanced_accuracy"] = float(balanced[index])
     return result
+
+
+def select_anomaly_threshold(calibration: dict[str, float], mode: str = "synthetic") -> float:
+    """Select a stored synthetic, normal-quantile, minimum, or maximum threshold.
+
+    ``min_synthetic_quantile`` is more sensitive than either constituent threshold and is useful
+    when a CutPaste-calibrated baseline under-predicts anomalies. The selected mode must still be
+    evaluated through permitted public submissions and frozen before private inference.
+    """
+    synthetic = float(calibration["threshold"])
+    quantile = float(calibration["normal_quantile_threshold"])
+    choices = {
+        "synthetic": synthetic,
+        "normal_quantile": quantile,
+        "min_synthetic_quantile": min(synthetic, quantile),
+        "max_synthetic_quantile": max(synthetic, quantile),
+    }
+    try:
+        return choices[mode]
+    except KeyError as error:
+        raise ValueError(f"Unknown threshold mode {mode!r}; choose {sorted(choices)}") from error
 
 
 def validate_anomaly_submission(submission: pd.DataFrame, test: pd.DataFrame) -> None:

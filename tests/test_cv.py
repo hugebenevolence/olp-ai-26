@@ -10,12 +10,15 @@ from olp_ai_26.cv.adversarial import fgsm, perturbation_statistics
 from olp_ai_26.cv.anomaly_detection import (
     AnomalyImageDataset,
     TimmPatchFeatureExtractor,
+    apply_normal_augmentation,
+    apply_synthetic_anomaly,
     calibrate_anomaly_threshold,
     cutpaste_batch,
     discover_normal_images,
     load_official_training_table,
     patch_memory_scores,
     sample_memory_bank,
+    select_anomaly_threshold,
     stage_official_task2_data,
     validate_anomaly_submission,
 )
@@ -145,6 +148,24 @@ def test_anomaly_feature_memory_and_calibration(tmp_path):
     calibrated = calibrate_anomaly_threshold([0.1, 0.2, 0.3], [0.7, 0.8, 0.9])
     assert 0.3 < calibrated["threshold"] < 0.7
     assert calibrated["proxy_balanced_accuracy"] == 1.0
+    assert select_anomaly_threshold(calibrated, "min_synthetic_quantile") <= calibrated["threshold"]
+    augmented = apply_normal_augmentation(image.unsqueeze(0), "contrast_up")
+    assert augmented.shape == image.unsqueeze(0).shape
+    assert augmented.min() >= 0 and augmented.max() <= 1
+    for synthetic_name in ("cutpaste", "mixup", "blur", "dark_curve"):
+        synthetic = apply_synthetic_anomaly(
+            image.unsqueeze(0).repeat(2, 1, 1, 1), synthetic_name, seed=42
+        )
+        repeated = apply_synthetic_anomaly(
+            image.unsqueeze(0).repeat(2, 1, 1, 1), synthetic_name, seed=42
+        )
+        assert synthetic.shape == (2, 3, 32, 32)
+        assert synthetic.min() >= 0 and synthetic.max() <= 1
+        assert torch.equal(synthetic, repeated)
+    mixup_input = torch.stack((torch.zeros(3, 16, 16), torch.ones(3, 16, 16)))
+    mixed = apply_synthetic_anomaly(mixup_input, "mixup", seed=42)
+    assert torch.all((mixed > 0) & (mixed < 1))
+    assert not torch.equal(mixed, mixup_input)
 
 
 def test_anomaly_submission_contract():

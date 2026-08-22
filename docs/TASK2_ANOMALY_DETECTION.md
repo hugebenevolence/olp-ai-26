@@ -66,6 +66,10 @@ Synthetic proxy balanced accuracy is a debugging/calibration signal, not the hid
 metric. Public aggregate feedback may tune an algorithmic threshold scale, but per-image manual
 labeling is forbidden.
 
+The supplied 0.577 run and the reasons for each revision are recorded in
+[`TASK2_0577_AUDIT.md`](TASK2_0577_AUDIT.md). Read that evidence table before changing multiple
+experimental axes at once.
+
 ## First public run
 
 Open `notebooks/image_anomaly_detection_template.ipynb` and change only the configuration cell:
@@ -74,6 +78,7 @@ Open `notebooks/image_anomaly_detection_template.ipynb` and change only the conf
 TEAM_NAME = "your_team"
 PHASE = "public"
 RUN_TRAINING = True
+EXPERIMENT_PRESET = "category_augmented"
 OFFICIAL_DATA_SOURCE = Path("/content/drive/MyDrive/olpai26/ThiChinhThucData.zip")
 PERSISTENT_DIR = Path("/content/drive/MyDrive/olpai26/task2_artifacts")
 ```
@@ -82,27 +87,38 @@ Run every cell. Verify the printed train counts match `664, 664, 302, 660, 660, 
 predicted anomaly count per category; then submit the generated ZIP. Do not assume a high CutPaste
 proxy score implies a high PublicScore.
 
-## Speed and memory controls
+## Experiment presets
 
-Change these in order if inference is too slow or GPU memory is insufficient:
+The configuration cell exposes three drag-and-plug presets:
 
 ```python
-MODEL_NAME = "resnet18"  # fastest correctness baseline
-IMAGE_SIZE = 224  # fewer patches
-BATCH_SIZE = 8  # GPU activation memory
-MAX_MEMORY_PATCHES = 2048  # distance-computation cost
-PROJECTION_DIM = 64  # memory and distance cost
+EXPERIMENT_PRESET = "baseline_0577"
+EXPERIMENT_PRESET = "category_models_only"
+EXPERIMENT_PRESET = "category_augmented"
 ```
 
-Reducing `MAX_MEMORY_PATCHES` has the largest effect on nearest-neighbor inference time. Reducing
-image size may hide small defects, so validate that change rather than treating it as free speed.
+`baseline_0577` reproduces the submitted design. `category_models_only` isolates per-category
+model/resolution/memory choices. `category_augmented` adds limited normal-memory invariance and
+separate synthetic anomaly families (`cutpaste`, `mixup`, `blur`, and `dark_curve`). Never add a
+suspected defect transform to `normal_augmentations`.
+
+Every category configuration stores `model_name`, `image_size`, `batch_size`,
+`max_memory_patches`, `top_k`, `normal_augmentations`, `synthetic_anomalies`, `normal_quantile`,
+`threshold_mode`, and `threshold_scale`. Edit one field or one preset at a time.
+
+## Speed and memory controls
+
+If Colab runs out of memory, reduce the affected category's `batch_size` first. If nearest-neighbor
+scoring is too slow, reduce `max_memory_patches`; this has the largest direct effect. Reducing
+`image_size` can hide small defects and should be treated as a measured model change.
 
 ## Public threshold experiments
 
-The notebook can emit candidates at threshold scales 0.90, 1.00, and 1.10 without retraining.
+The notebook emits candidates at threshold scales 0.90, 0.95, 1.00, and 1.05 without retraining
+(1.00 is the main candidate).
 Submit deliberate experiments only; the public limit is 20. Lower scale predicts more anomalies.
-After selecting the scale from aggregate PublicScore, set `THRESHOLD_SCALE` and rerun the freeze
-cell so the value is stored in `task2_anomaly_bundle.pt`.
+After selecting the scale from aggregate PublicScore, set that category configuration's
+`threshold_scale` and rerun training so the exact choice is stored in the experiment bundle.
 
 ## Private final
 
@@ -111,9 +127,11 @@ Before private data is released, ensure the frozen bundle is in durable storage.
 ```python
 PHASE = "private"
 RUN_TRAINING = False
-BUNDLE_PATH = PERSISTENT_DIR / "task2_anomaly_bundle.pt"
+EXPERIMENT_PRESET = "category_augmented"  # must match the selected public run
 ```
 
 The notebook rebuilds the architecture without downloading weights, restores the exact frozen
-encoder, memories, thresholds, and scale, and performs inference only. It refuses private-mode
-training. Validate that the final ZIP contains exactly `task2_private_output.csv`.
+encoders, memories, thresholds, and scales from
+`PERSISTENT_DIR / EXPERIMENT_PRESET / task2_<preset>_bundle.pt`, then performs inference only. It
+refuses private-mode training. Validate that the final ZIP contains exactly
+`task2_private_output.csv`.
