@@ -219,13 +219,14 @@ does not fine-tune DINO. Select exactly one mode near the top of the notebook:
 
 | `EXPERIMENT_MODE` | Synthetic positives | TTA | Intended use |
 |---|---|---|---|
-| `085_original_public` | MixUp, original CutMix, dark curve, white line | No | Reproduce the accepted public baseline |
+| `085_original_public` | MixUp, original CutMix, dark curve, white line | No | Accepted public configuration, also frozen for private inference |
 | `085_new_aug_no_tta` | MixUp-first, subtle CutMix, gray curve, white curve | No | Measure the new augmentation only |
 | `085_new_aug_tta` | Same new profile | Category-safe flips | Measure new augmentation plus matched TTA |
 
 Every mode has its own experiment directory and frozen bundle, and every run writes exactly one
-submission ZIP. The original mode is intentionally public-only. Train each new mode on public with
-`RUN_TRAINING=True`; the resulting frozen bundle can then be loaded for private inference.
+submission ZIP. Train all three modes with `PHASE="public"` and `RUN_TRAINING=True`; each resulting
+frozen bundle can then be loaded with `PHASE="private"` and `RUN_TRAINING=False` to infer over the
+complete private test set.
 
 Adapter labels are generated in pixel space:
 

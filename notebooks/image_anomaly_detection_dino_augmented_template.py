@@ -77,17 +77,14 @@ EXPERIMENT_MODES = {
     "085_original_public": {
         "synthetic_profile": "original",
         "tta": False,
-        "public_only": True,
     },
     "085_new_aug_no_tta": {
         "synthetic_profile": "private_inspection_v1",
         "tta": False,
-        "public_only": False,
     },
     "085_new_aug_tta": {
         "synthetic_profile": "private_inspection_v1",
         "tta": True,
-        "public_only": False,
     },
 }
 if EXPERIMENT_MODE not in EXPERIMENT_MODES:
@@ -151,8 +148,6 @@ if PHASE not in {"public", "private"}:
     raise ValueError("PHASE must be 'public' or 'private'")
 if PHASE == "private" and RUN_TRAINING:
     raise ValueError("Private is inference-only: load the frozen public bundle")
-if bool(MODE_CONFIG["public_only"]) and PHASE != "public":
-    raise ValueError("085_original_public is intentionally restricted to the public phase")
 if AUGMENTATION_PROFILE not in {"category_policy", "blur_only"}:
     raise ValueError("AUGMENTATION_PROFILE must be 'category_policy' or 'blur_only'")
 if CLEAN_MEMORY_PATCHES < 1 or AUGMENTED_MEMORY_PATCHES < 1:
