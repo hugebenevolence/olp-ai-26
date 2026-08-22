@@ -81,7 +81,7 @@ Open `notebooks/image_anomaly_detection_template.ipynb` and change only the conf
 TEAM_NAME = "your_team"
 PHASE = "public"
 RUN_TRAINING = True
-EXPERIMENT_PRESET = "category_augmented"
+EXPERIMENT_PRESET = "anomalydino_448"
 OFFICIAL_DATA_SOURCE = Path("/content/drive/MyDrive/olpai26/ThiChinhThucData.zip")
 PERSISTENT_DIR = Path("/content/drive/MyDrive/olpai26/task2_artifacts")
 ```
@@ -92,12 +92,13 @@ proxy score implies a high PublicScore.
 
 ## Experiment presets
 
-The configuration cell exposes three drag-and-plug presets:
+The configuration cell exposes four drag-and-plug presets:
 
 ```python
 EXPERIMENT_PRESET = "baseline_0577"
 EXPERIMENT_PRESET = "category_models_only"
 EXPERIMENT_PRESET = "category_augmented"
+EXPERIMENT_PRESET = "anomalydino_448"
 ```
 
 `baseline_0577` reproduces the submitted design. `category_models_only` isolates per-category
@@ -105,6 +106,13 @@ model/resolution/memory choices. `category_augmented` adds limited normal-memory
 including the observed mild blur, and trains positive evidence from low-opacity CutMix, short dark
 curves, and short thin white lines. Never add an actual suspected defect transform to
 `normal_augmentations`; blur is there only because inspection established it as normal variation.
+
+`anomalydino_448` is the recommended next run after the supplied augmented notebook remained at
+0.590. It uses DINOv2-S/14 final-layer patch tokens at 448 pixels, cosine 1-nearest-neighbor
+distance, and the mean of the highest 1% patch distances. It intentionally disables the synthetic
+head to isolate the backbone/scoring change. See
+[`TASK2_ANOMALYDINO_RESEARCH.md`](TASK2_ANOMALYDINO_RESEARCH.md) for the primary-source comparison,
+gap table, and known departures from the paper.
 
 Every category configuration stores `model_name`, `image_size`, `batch_size`,
 `max_memory_patches`, `top_k`, `normal_augmentations`, `synthetic_anomalies`, `normal_quantile`,
@@ -204,7 +212,7 @@ Before private data is released, ensure the frozen bundle is in durable storage.
 ```python
 PHASE = "private"
 RUN_TRAINING = False
-EXPERIMENT_PRESET = "category_augmented"  # must match the selected public run
+EXPERIMENT_PRESET = "anomalydino_448"  # must match the selected public run
 ```
 
 The notebook rebuilds the architecture without downloading weights, restores the exact frozen

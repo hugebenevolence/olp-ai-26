@@ -339,6 +339,72 @@ class TimmPatchFeatureExtractor(nn.Module):
         return F.normalize(patches, dim=-1)
 
 
+class DinoV2PatchFeatureExtractor(nn.Module):
+    """Extract normalized final-layer DINOv2 patch tokens for AnomalyDINO-style scoring.
+
+    Unlike the CNN PatchCore extractor, this wrapper does not concatenate multiple layers or apply
+    a random projection. DINOv2's native 14-by-14 patch tokens are used directly, matching the
+    representation choice in AnomalyDINO. The configured square input size must be divisible by 14.
+    """
+
+    def __init__(
+        self,
+        model_name: str = "vit_small_patch14_dinov2.lvd142m",
+        *,
+        image_size: int = 448,
+        pretrained_allowed: bool = True,
+        checkpoint_path: Path | str | None = None,
+    ) -> None:
+        """Build a frozen timm DINOv2 encoder with reproducible ImageNet normalization.
+
+        Args:
+            model_name: A timm DINOv2 model identifier.
+            image_size: Square input resolution. It must be a multiple of DINOv2's patch size 14.
+            pretrained_allowed: Whether timm may download the permitted pretrained weights.
+            checkpoint_path: Optional staged local checkpoint used instead of a network download.
+        """
+        super().__init__()
+        if image_size < 14 or image_size % 14:
+            raise ValueError("DINOv2 image_size must be a positive multiple of 14")
+        self.encoder = timm.create_model(
+            model_name,
+            pretrained=pretrained_allowed and checkpoint_path is None,
+            checkpoint_path=str(checkpoint_path or ""),
+            num_classes=0,
+            img_size=image_size,
+        )
+        for parameter in self.encoder.parameters():
+            parameter.requires_grad = False
+        self.image_size = image_size
+        self.patch_size = 14
+        self.num_prefix_tokens = int(getattr(self.encoder, "num_prefix_tokens", 1))
+        self.register_buffer("mean", torch.tensor((0.485, 0.456, 0.406)).view(1, 3, 1, 1))
+        self.register_buffer("std", torch.tensor((0.229, 0.224, 0.225)).view(1, 3, 1, 1))
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        """Return L2-normalized patch tokens shaped ``[batch, patches, embedding_dim]``."""
+        if images.ndim != 4 or images.shape[-2:] != (self.image_size, self.image_size):
+            raise ValueError(
+                f"Expected DINOv2 images shaped [B,3,{self.image_size},{self.image_size}]"
+            )
+        tokens = self.encoder.forward_features((images - self.mean) / self.std)
+        if isinstance(tokens, dict):
+            try:
+                patches = tokens["x_norm_patchtokens"]
+            except KeyError as error:
+                raise RuntimeError(
+                    "DINOv2 output does not contain normalized patch tokens"
+                ) from error
+        else:
+            patches = tokens[:, self.num_prefix_tokens :]
+        expected_patches = (self.image_size // self.patch_size) ** 2
+        if patches.shape[1] != expected_patches:
+            raise RuntimeError(
+                f"Expected {expected_patches} DINOv2 patches, received {patches.shape[1]}"
+            )
+        return F.normalize(patches.float(), dim=-1)
+
+
 def sample_memory_bank(
     patch_batches: Iterable[torch.Tensor],
     *,
@@ -374,6 +440,8 @@ def patch_memory_scores(
     memory_bank: torch.Tensor,
     *,
     top_k: int = 3,
+    top_fraction: float | None = None,
+    distance_metric: str = "euclidean",
     distance_chunk_size: int = 2048,
 ) -> torch.Tensor:
     """Score each image by its top-k largest nearest-normal-patch distances.
@@ -385,6 +453,8 @@ def patch_memory_scores(
         embeddings,
         memory_bank,
         top_k=top_k,
+        top_fraction=top_fraction,
+        distance_metric=distance_metric,
         distance_chunk_size=distance_chunk_size,
     )[:, -1]
 
@@ -394,27 +464,48 @@ def patch_memory_features(
     memory_bank: torch.Tensor,
     *,
     top_k: int = 3,
+    top_fraction: float | None = None,
+    distance_metric: str = "euclidean",
     distance_chunk_size: int = 2048,
 ) -> torch.Tensor:
     """Summarize each image's nearest-memory patch-distance distribution.
 
     The six returned columns are mean, standard deviation, maximum, 90th percentile, 99th
-    percentile, and top-k mean. The final column exactly matches :func:`patch_memory_scores` and
-    the full vector is suitable for a small synthetic-positive evidence head.
+    percentile, and upper-tail mean. With ``top_fraction=0.01``, the last value is the mean of the
+    most anomalous 1% of patches used by AnomalyDINO. Otherwise, ``top_k`` determines the tail size.
+    The final column exactly matches :func:`patch_memory_scores`.
     """
     if embeddings.ndim != 3 or memory_bank.ndim != 2:
         raise ValueError("Expected embeddings [B,P,D] and memory_bank [M,D]")
     if embeddings.shape[-1] != memory_bank.shape[-1]:
         raise ValueError("Embedding and memory-bank dimensions differ")
+    if distance_chunk_size < 1:
+        raise ValueError("distance_chunk_size must be positive")
+    if distance_metric not in {"euclidean", "cosine"}:
+        raise ValueError("distance_metric must be 'euclidean' or 'cosine'")
+    if top_fraction is not None and not 0 < top_fraction <= 1:
+        raise ValueError("top_fraction must be in (0, 1]")
     batch, patches, dimensions = embeddings.shape
     flat = embeddings.float().reshape(-1, dimensions)
     bank = memory_bank.to(flat.device, dtype=torch.float32)
+    normalized_bank = F.normalize(bank, dim=-1) if distance_metric == "cosine" else None
     nearest = []
     for start in range(0, len(flat), distance_chunk_size):
-        distances = torch.cdist(flat[start : start + distance_chunk_size], bank)
-        nearest.append(distances.min(dim=1).values)
+        queries = flat[start : start + distance_chunk_size]
+        if distance_metric == "cosine":
+            queries = F.normalize(queries, dim=-1)
+            assert normalized_bank is not None
+            values = 1 - queries @ normalized_bank.T
+            nearest.append(values.min(dim=1).values.clamp(0, 2))
+        else:
+            distances = torch.cdist(queries, bank)
+            nearest.append(distances.min(dim=1).values)
     patch_scores = torch.cat(nearest).reshape(batch, patches)
-    count = min(max(1, top_k), patches)
+    count = (
+        max(1, math.ceil(patches * top_fraction))
+        if top_fraction is not None
+        else min(max(1, top_k), patches)
+    )
     quantiles = torch.quantile(patch_scores, torch.tensor((0.90, 0.99), device=flat.device), dim=1)
     return torch.stack(
         (

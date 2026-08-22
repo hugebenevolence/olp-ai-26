@@ -9,6 +9,7 @@ from PIL import Image
 from olp_ai_26.cv.adversarial import fgsm, perturbation_statistics
 from olp_ai_26.cv.anomaly_detection import (
     AnomalyImageDataset,
+    DinoV2PatchFeatureExtractor,
     TimmPatchFeatureExtractor,
     apply_normal_augmentation,
     apply_synthetic_anomaly,
@@ -215,6 +216,29 @@ def test_anomaly_feature_memory_and_calibration(tmp_path):
     )
     assert torch.all(evidence >= 0)
     assert evidence[2:].mean() > evidence[:2].mean()
+
+
+def test_anomalydino_extractor_and_cosine_tail_scoring():
+    extractor = DinoV2PatchFeatureExtractor(
+        "vit_small_patch14_dinov2.lvd142m",
+        image_size=56,
+        pretrained_allowed=False,
+    ).eval()
+    with torch.inference_mode():
+        tokens = extractor(torch.rand(1, 3, 56, 56))
+    assert tokens.shape == (1, 16, 384)
+    assert torch.allclose(tokens.norm(dim=-1), torch.ones(1, 16), atol=1e-5)
+
+    embeddings = torch.tensor([[[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [1.0, 1.0]]])
+    bank = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+    statistics = patch_memory_features(
+        embeddings,
+        bank,
+        top_fraction=0.25,
+        distance_metric="cosine",
+    )
+    assert statistics.shape == (1, 6)
+    assert torch.allclose(statistics[:, -1], torch.tensor([1.0]), atol=1e-6)
 
 
 def test_anomaly_submission_contract():

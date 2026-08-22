@@ -40,6 +40,7 @@ from olp_ai_26.core.inspect import dataset_report
 from olp_ai_26.core.split import make_split
 from olp_ai_26.cv.anomaly_detection import (
     AnomalyImageDataset,
+    DinoV2PatchFeatureExtractor,
     TimmPatchFeatureExtractor,
     apply_normal_augmentation,
     apply_synthetic_anomaly,
@@ -62,16 +63,17 @@ from olp_ai_26.cv.anomaly_detection import (
 #
 # 1. Keep the submitted `baseline_0577` result as reference; do not spend another submission on it.
 # 2. Run `category_models_only` to isolate the model-choice effect.
-# 3. Run `category_augmented` to measure the added limited-augmentation/calibration effect.
-# 4. Use global threshold candidates only on the better approach.
+# 3. Run `anomalydino_448` to replace ImageNet CNN patches with the paper-backed DINOv2 method.
+# 4. Keep `category_augmented` as a diagnostic; the supplied executed run scored 0.590.
+# 5. Use global threshold candidates only on the better representation.
 
 # %%
 TEAM_NAME = "replace_team_name"
 TASK_NAME = "task2"
 PHASE = "public"  # public | private
 RUN_TRAINING = True
-EXPERIMENT_PRESET = "category_augmented"
-# choices: baseline_0577 | category_models_only | category_augmented
+EXPERIMENT_PRESET = "anomalydino_448"
+# choices: baseline_0577 | category_models_only | category_augmented | anomalydino_448
 
 OFFICIAL_DATA_SOURCE = (
     Path("/content/drive/MyDrive/olpai26/ThiChinhThucData.zip")
@@ -115,6 +117,7 @@ MODEL_CHECKPOINTS = {
     "wide_resnet50_2": None,
     "convnext_tiny": None,
     "resnet50": None,
+    "vit_small_patch14_dinov2.lvd142m": None,
 }
 SEED = 42
 NUM_WORKERS = 2
@@ -132,11 +135,15 @@ print(gpu_report())
 print(dataset_report(paths.data_dir, image_limit=100)["counts"])
 
 # %% [markdown]
-# ## 1. Category model and augmentation presets
+# ## 1. Backbone, scoring, and augmentation presets
 #
 # Augmentations expand only the **normal memory bank**. They are deliberately deterministic and
 # mild. Validation/test images remain unaugmented. `normal_quantile` and `threshold_mode` are
 # calibration choices; changes to them are separate from backbone changes.
+#
+# `anomalydino_448` implements the paper's core recipe: final-layer DINOv2-S/14 patch tokens,
+# cosine 1-nearest-neighbor distance, and the mean of the highest 1% patch distances. It disables
+# the synthetic head so this run isolates representation/scoring from the executed 0.590 approach.
 
 # %%
 
@@ -146,10 +153,14 @@ DEFAULT_SYNTHETIC_PARAMETERS = synthetic_anomaly_defaults()
 def category_config(
     model_name,
     *,
+    extractor_family="timm_multiscale",
     image_size=256,
     batch_size=16,
     memory_patches=4096,
     top_k=3,
+    top_fraction=None,
+    distance_metric="euclidean",
+    distance_chunk_size=2048,
     augmentations=("identity",),
     normal_quantile=0.99,
     threshold_mode="synthetic",
@@ -163,12 +174,16 @@ def category_config(
     parameters = synthetic_parameters or DEFAULT_SYNTHETIC_PARAMETERS
     return {
         "model_name": model_name,
+        "extractor_family": extractor_family,
         "out_indices": (2, 3),
         "image_size": image_size,
         "batch_size": batch_size,
         "projection_dim": 128,
         "max_memory_patches": memory_patches,
         "top_k": top_k,
+        "top_fraction": top_fraction,
+        "distance_metric": distance_metric,
+        "distance_chunk_size": distance_chunk_size,
         "normal_valid_size": 0.20,
         "normal_quantile": normal_quantile,
         "threshold_mode": threshold_mode,
@@ -266,6 +281,30 @@ NORMAL_QUANTILES = {
     "category_05": 0.975,
     "category_06": 0.95,
 }
+
+# Faithful AnomalyDINO-S core: final-layer DINOv2-S/14 tokens at 448 px, cosine 1-NN, and
+# empirical tail value at risk over the most anomalous 1% of patches. The paper is few-shot; this
+# competition adaptation uses all available normal images but bounds each category memory so exact
+# search and the frozen private bundle remain practical on Colab.
+ANOMALYDINO_CONFIGS = {
+    category: category_config(
+        "vit_small_patch14_dinov2.lvd142m",
+        extractor_family="dinov2",
+        image_size=448,
+        batch_size=8,
+        memory_patches=32768,
+        top_k=1,
+        top_fraction=0.01,
+        distance_metric="cosine",
+        distance_chunk_size=256,
+        augmentations=("identity",),
+        normal_quantile=NORMAL_QUANTILES[category],
+        threshold_mode="normal_quantile",
+        synthetic_anomalies=(),
+        positive_evidence_weight=0.0,
+    )
+    for category in CATEGORIES
+}
 CATEGORY_AUGMENTED_CONFIGS = {
     category: {
         **MODELS_ONLY_CONFIGS[category],
@@ -283,6 +322,7 @@ PRESETS = {
     "baseline_0577": BASELINE_CONFIGS,
     "category_models_only": MODELS_ONLY_CONFIGS,
     "category_augmented": CATEGORY_AUGMENTED_CONFIGS,
+    "anomalydino_448": ANOMALYDINO_CONFIGS,
 }
 try:
     CATEGORY_CONFIGS = PRESETS[EXPERIMENT_PRESET]
@@ -502,7 +542,16 @@ if RUN_TRAINING and PERSIST_AUGMENTATION_AUDIT:
 
 def extractor_key(config):
     """Create a stable key so identical backbone/projection states are stored only once."""
-    payload = {key: config[key] for key in ("model_name", "out_indices", "projection_dim")}
+    payload = {
+        key: config[key]
+        for key in (
+            "extractor_family",
+            "model_name",
+            "out_indices",
+            "projection_dim",
+            "image_size",
+        )
+    }
     payload["seed"] = SEED
     return json.dumps(payload, sort_keys=True)
 
@@ -510,6 +559,19 @@ def extractor_key(config):
 def build_extractor(config, *, load_pretrained):
     """Build one configured frozen feature extractor on the active device."""
     checkpoint = MODEL_CHECKPOINTS.get(config["model_name"])
+    if config["extractor_family"] == "dinov2":
+        return (
+            DinoV2PatchFeatureExtractor(
+                config["model_name"],
+                image_size=config["image_size"],
+                pretrained_allowed=PRETRAINED_ALLOWED and load_pretrained,
+                checkpoint_path=checkpoint if load_pretrained else None,
+            )
+            .to(DEVICE)
+            .eval()
+        )
+    if config["extractor_family"] != "timm_multiscale":
+        raise ValueError(f"Unknown extractor_family: {config['extractor_family']}")
     return (
         TimmPatchFeatureExtractor(
             config["model_name"],
@@ -554,7 +616,16 @@ def score_frame(frame, root, extractor, memory_bank, config, *, synthetic_method
             )
         with torch.autocast(DEVICE, dtype=AMP_DTYPE, enabled=DEVICE == "cuda"):
             embeddings = extractor(images.to(DEVICE)).float()
-        feature_batches.append(patch_memory_features(embeddings, bank, top_k=config["top_k"]).cpu())
+        feature_batches.append(
+            patch_memory_features(
+                embeddings,
+                bank,
+                top_k=config["top_k"],
+                top_fraction=config["top_fraction"],
+                distance_metric=config["distance_metric"],
+                distance_chunk_size=config["distance_chunk_size"],
+            ).cpu()
+        )
     features = torch.cat(feature_batches)
     return features[:, -1].numpy().astype(np.float64), features
 
@@ -661,7 +732,7 @@ if RUN_TRAINING:
                 synthetic_patch_scores, synthetic_features, artifact_for_scoring
             )
             synthetic_parts.append(combined_synthetic)
-        synthetic_scores = np.concatenate(synthetic_parts)
+        synthetic_scores = np.concatenate(synthetic_parts) if synthetic_parts else None
         calibrated = calibrate_anomaly_threshold(
             normal_scores,
             synthetic_scores,
