@@ -405,6 +405,48 @@ class DinoV2PatchFeatureExtractor(nn.Module):
         return F.normalize(patches.float(), dim=-1)
 
 
+def aggregate_patch_neighborhoods(
+    embeddings: torch.Tensor,
+    *,
+    kernel_size: int,
+    grid_size: tuple[int, int] | None = None,
+) -> torch.Tensor:
+    """Average ViT patch tokens over a centered local neighborhood.
+
+    This implements the representation step used by multi-degree local-neighborhood anomaly
+    detectors. A degree of one leaves the token grid unchanged; degrees three and five add local
+    context while preserving one output token per original patch position.
+
+    Args:
+        embeddings: Patch tokens shaped ``[batch, patches, dimensions]``.
+        kernel_size: Positive odd neighborhood width, normally 1, 3, or 5.
+        grid_size: Optional ``(height, width)`` patch grid. When omitted, a square grid is inferred.
+
+    Returns:
+        L2-normalized tokens with the same shape as ``embeddings``.
+    """
+    if embeddings.ndim != 3:
+        raise ValueError("Expected patch embeddings shaped [B,P,D]")
+    if kernel_size < 1 or kernel_size % 2 == 0:
+        raise ValueError("kernel_size must be a positive odd integer")
+    batch, patches, dimensions = embeddings.shape
+    if grid_size is None:
+        side = math.isqrt(patches)
+        grid_size = (side, side)
+    height, width = grid_size
+    if height < 1 or width < 1 or height * width != patches:
+        raise ValueError("grid_size must contain exactly one position per patch token")
+    feature_map = embeddings.float().transpose(1, 2).reshape(batch, dimensions, height, width)
+    pooled = F.avg_pool2d(
+        feature_map,
+        kernel_size=kernel_size,
+        stride=1,
+        padding=kernel_size // 2,
+        count_include_pad=False,
+    )
+    return F.normalize(pooled.flatten(2).transpose(1, 2), dim=-1)
+
+
 def sample_memory_bank(
     patch_batches: Iterable[torch.Tensor],
     *,
@@ -475,6 +517,31 @@ def patch_memory_features(
     most anomalous 1% of patches used by AnomalyDINO. Otherwise, ``top_k`` determines the tail size.
     The final column exactly matches :func:`patch_memory_scores`.
     """
+    patch_scores = patch_memory_distances(
+        embeddings,
+        memory_bank,
+        distance_metric=distance_metric,
+        distance_chunk_size=distance_chunk_size,
+    )
+    return summarize_patch_distances(
+        patch_scores,
+        top_k=top_k,
+        top_fraction=top_fraction,
+    )
+
+
+def patch_memory_distances(
+    embeddings: torch.Tensor,
+    memory_bank: torch.Tensor,
+    *,
+    distance_metric: str = "euclidean",
+    distance_chunk_size: int = 2048,
+) -> torch.Tensor:
+    """Return each query patch's distance to its nearest normal-memory patch.
+
+    The output retains the image and patch axes, enabling multiple neighborhood degrees to be
+    fused at patch level before image-level tail aggregation.
+    """
     if embeddings.ndim != 3 or memory_bank.ndim != 2:
         raise ValueError("Expected embeddings [B,P,D] and memory_bank [M,D]")
     if embeddings.shape[-1] != memory_bank.shape[-1]:
@@ -483,8 +550,6 @@ def patch_memory_features(
         raise ValueError("distance_chunk_size must be positive")
     if distance_metric not in {"euclidean", "cosine"}:
         raise ValueError("distance_metric must be 'euclidean' or 'cosine'")
-    if top_fraction is not None and not 0 < top_fraction <= 1:
-        raise ValueError("top_fraction must be in (0, 1]")
     batch, patches, dimensions = embeddings.shape
     flat = embeddings.float().reshape(-1, dimensions)
     bank = memory_bank.to(flat.device, dtype=torch.float32)
@@ -500,13 +565,31 @@ def patch_memory_features(
         else:
             distances = torch.cdist(queries, bank)
             nearest.append(distances.min(dim=1).values)
-    patch_scores = torch.cat(nearest).reshape(batch, patches)
+    return torch.cat(nearest).reshape(batch, patches)
+
+
+def summarize_patch_distances(
+    patch_scores: torch.Tensor,
+    *,
+    top_k: int = 3,
+    top_fraction: float | None = None,
+) -> torch.Tensor:
+    """Summarize per-patch anomaly distances into six image-level statistics."""
+    if patch_scores.ndim != 2:
+        raise ValueError("Expected patch_scores shaped [B,P]")
+    if top_fraction is not None and not 0 < top_fraction <= 1:
+        raise ValueError("top_fraction must be in (0, 1]")
+    _, patches = patch_scores.shape
     count = (
         max(1, math.ceil(patches * top_fraction))
         if top_fraction is not None
         else min(max(1, top_k), patches)
     )
-    quantiles = torch.quantile(patch_scores, torch.tensor((0.90, 0.99), device=flat.device), dim=1)
+    quantiles = torch.quantile(
+        patch_scores,
+        torch.tensor((0.90, 0.99), device=patch_scores.device),
+        dim=1,
+    )
     return torch.stack(
         (
             patch_scores.mean(dim=1),

@@ -177,11 +177,39 @@ combined_score = (
 Start with `SYNTHETIC_EVIDENCE_WEIGHT = 0.25`. A value of `0.0` makes the head inert; larger values
 make known synthetic patterns more influential but still cannot reduce any DINO score.
 
-When evidence is enabled, one Colab run writes both `candidate_main` and
-`candidate_dino_only_control`. The control uses the identical clean/augmented memories and the
-normal-only threshold calibrated from the complete outer validation split; use it to confirm the
-0.737-style behavior without retraining. Submit the evidence candidate and control as separate
-public experiments, not as an ensemble.
+### After the 0.769 result: local-context scoring
+
+The executed synthetic-evidence run's unscaled candidate predicted 126 anomalies, compared with 134
+for its no-synthetic control. The winning scale 0.85 predicted 189. Synthetic proxy balanced
+accuracy was high (0.819 to 0.984), but the evidence-aware calibration also moved category
+thresholds in both directions; therefore proxy separation did not translate cleanly into additional
+test anomaly calls. Scale 0.85 is now frozen instead of searched further.
+
+The next candidate changes patch representation. Inspired by MuSc's Local Neighborhood Aggregation
+with Multiple Degrees, each DINO token is represented at native degree 1 and after centered 3x3
+average pooling. Each degree has its own protected clean and augmented memory. Nearest-normal
+distances are averaged patch-by-patch before the top-1% image tail is calculated:
+
+```python
+native_distance = nearest_normal_distance(degree_1_tokens, degree_1_memory)
+context_distance = nearest_normal_distance(degree_3_tokens, degree_3_memory)
+fused_patch_distance = (native_distance + context_distance) / 2
+dino_score = mean_top_1_percent(fused_patch_distance)
+```
+
+MuSc reports that combining degrees `{1, 3}` gave its strongest anomaly-classification ablation on
+both MVTec AD and VisA; degree 5 can smooth small defects. This notebook adapts only its
+normal-reference local-context representation and does **not** perform MuSc's transductive scoring
+against public/private test images. Primary sources: [MuSc paper](https://arxiv.org/abs/2401.16753)
+and [official implementation](https://github.com/xrli-U/MuSc).
+
+One run writes three method candidates at the already selected scale 0.85:
+
+- `candidate_main`: degrees `{1,3}` plus synthetic positive evidence.
+- `candidate_multidegree_no_synthetic`: degrees `{1,3}` without the synthetic head.
+- `candidate_native_degree_1_no_synthetic`: native patches only, without the synthetic head.
+
+These are representation/evidence ablations, not another threshold sweep.
 
 ## Persisted augmentation audit
 

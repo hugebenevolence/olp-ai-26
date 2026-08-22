@@ -11,6 +11,7 @@ from olp_ai_26.cv.anomaly_detection import (
     AnomalyImageDataset,
     DinoV2PatchFeatureExtractor,
     TimmPatchFeatureExtractor,
+    aggregate_patch_neighborhoods,
     apply_normal_augmentation,
     apply_synthetic_anomaly,
     calibrate_anomaly_threshold,
@@ -18,12 +19,14 @@ from olp_ai_26.cv.anomaly_detection import (
     discover_normal_images,
     fit_positive_evidence_head,
     load_official_training_table,
+    patch_memory_distances,
     patch_memory_features,
     patch_memory_scores,
     positive_evidence_scores,
     sample_memory_bank,
     select_anomaly_threshold,
     stage_official_task2_data,
+    summarize_patch_distances,
     synthetic_anomaly_defaults,
     validate_anomaly_submission,
 )
@@ -239,6 +242,34 @@ def test_anomalydino_extractor_and_cosine_tail_scoring():
     )
     assert statistics.shape == (1, 6)
     assert torch.allclose(statistics[:, -1], torch.tensor([1.0]), atol=1e-6)
+
+
+def test_multidegree_patch_aggregation_and_distance_fusion():
+    """Local context must preserve the grid and support patch-level score fusion."""
+    tokens = torch.zeros(1, 9, 2)
+    tokens[0, 4] = torch.tensor([1.0, 0.0])
+    degree_one = aggregate_patch_neighborhoods(tokens, kernel_size=1, grid_size=(3, 3))
+    degree_three = aggregate_patch_neighborhoods(tokens, kernel_size=3, grid_size=(3, 3))
+    assert degree_one.shape == degree_three.shape == tokens.shape
+    assert torch.count_nonzero(degree_three[..., 0]) == 9
+    bank = torch.tensor([[0.0, 1.0]])
+    native_distances = patch_memory_distances(
+        degree_one,
+        bank,
+        distance_metric="cosine",
+    )
+    context_distances = patch_memory_distances(
+        degree_three,
+        bank,
+        distance_metric="cosine",
+    )
+    fused = summarize_patch_distances(
+        (native_distances + context_distances) / 2,
+        top_fraction=1 / 9,
+    )
+    assert native_distances.shape == context_distances.shape == (1, 9)
+    assert fused.shape == (1, 6)
+    assert fused[0, -1] >= 0
 
 
 def test_anomaly_submission_contract():

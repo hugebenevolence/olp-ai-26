@@ -1,11 +1,10 @@
 # %% [markdown]
-# # Task 2 - DINOv2 with protected clean and augmented normal memories
+# # Task 2 - DINOv2 native-patch and local-context anomaly scoring
 #
-# This candidate produced 0.737 with synthetic evidence disabled. DINOv2, cosine 1-NN, top-1%
-# tail scoring, square 448-pixel preprocessing, and the protected clean/augmented normal memories
-# remain unchanged. The optional one-way evidence branch learns only from the data-driven synthetic
-# defects inspected earlier. It may increase an anomaly score, but it can never lower the original
-# DINO score when an image does not resemble those synthetic defects.
+# The preceding evidence candidate reached 0.769 at threshold scale 0.85. This experiment freezes
+# that selected scale and changes the representation instead of continuing threshold search. It
+# averages nearest-normal distances from native DINO patches (degree 1) and 3x3 locally aggregated
+# DINO patches (degree 3) before top-1% tail scoring. Separate memory banks protect both scales.
 
 # %% [markdown]
 # ## Colab bootstrap
@@ -42,16 +41,18 @@ from olp_ai_26.core.split import make_split
 from olp_ai_26.cv.anomaly_detection import (
     AnomalyImageDataset,
     DinoV2PatchFeatureExtractor,
+    aggregate_patch_neighborhoods,
     apply_normal_augmentation,
     apply_synthetic_anomaly,
     calibrate_anomaly_threshold,
     fit_positive_evidence_head,
     load_official_training_table,
-    patch_memory_features,
+    patch_memory_distances,
     positive_evidence_scores,
     sample_memory_bank,
     select_anomaly_threshold,
     stage_official_task2_data,
+    summarize_patch_distances,
     synthetic_anomaly_defaults,
     validate_anomaly_submission,
 )
@@ -67,7 +68,7 @@ TEAM_NAME = "replace_team_name"
 TASK_NAME = "task2"
 PHASE = "public"  # public | private
 RUN_TRAINING = True
-EXPERIMENT_NAME = "anomalydino_normal_augmented_evidence"
+EXPERIMENT_NAME = "anomalydino_local_context_13"
 
 OFFICIAL_DATA_SOURCE = (
     Path("/content/drive/MyDrive/olpai26/ThiChinhThucData.zip")
@@ -91,13 +92,17 @@ AUGMENTED_MEMORY_PATCHES = 16384
 TOP_FRACTION = 0.01
 DISTANCE_CHUNK_SIZE = 256
 NORMAL_VALID_SIZE = 0.20
+# MuSc's classification ablation favored degrees {1,3}; degree 5 can smooth away small defects.
+# Each degree receives a separate full-sized memory so context patches never displace native ones.
+NEIGHBORHOOD_DEGREES = (1, 3)
+SELECTED_THRESHOLD_SCALE = 0.85
 AUGMENTATION_PROFILE = "category_policy"  # category_policy | blur_only
 PERSIST_AUGMENTATION_AUDIT = True
 AUGMENTATION_AUDIT_SAMPLES = 4
 SHOW_AUGMENTATION_PLOTS = True
 
-# Set this to False to reproduce the executed 0.737 method exactly. When True, the normal-memory
-# path is unchanged and a separate, non-negative synthetic-evidence term is added to its score.
+# Set this to False to isolate the multi-degree DINO representation. When True, a separate,
+# non-negative synthetic-evidence term is added without changing either normal memory.
 ENABLE_SYNTHETIC_EVIDENCE = True
 SYNTHETIC_EVIDENCE_WEIGHT = 0.25
 EVIDENCE_TRAIN_FRACTION = 0.25
@@ -117,6 +122,14 @@ if not 0 < EVIDENCE_TRAIN_FRACTION < 1:
     raise ValueError("EVIDENCE_TRAIN_FRACTION must be between zero and one")
 if SYNTHETIC_EVIDENCE_WEIGHT < 0:
     raise ValueError("SYNTHETIC_EVIDENCE_WEIGHT cannot be negative")
+if not NEIGHBORHOOD_DEGREES or any(
+    degree < 1 or degree % 2 == 0 for degree in NEIGHBORHOOD_DEGREES
+):
+    raise ValueError("NEIGHBORHOOD_DEGREES must contain positive odd integers")
+if 1 not in NEIGHBORHOOD_DEGREES:
+    raise ValueError("NEIGHBORHOOD_DEGREES must retain native degree 1")
+if SELECTED_THRESHOLD_SCALE <= 0:
+    raise ValueError("SELECTED_THRESHOLD_SCALE must be positive")
 
 if "google.colab" in sys.modules and (
     str(OFFICIAL_DATA_SOURCE).startswith("/content/drive") or PERSISTENT_DIR
@@ -204,6 +217,8 @@ config_table = pd.DataFrame(
             "image_size": IMAGE_SIZE,
             "clean_memory_patches": CLEAN_MEMORY_PATCHES,
             "augmented_memory_patches": AUGMENTED_MEMORY_PATCHES,
+            "neighborhood_degrees": NEIGHBORHOOD_DEGREES,
+            "selected_threshold_scale": SELECTED_THRESHOLD_SCALE,
             "normal_augmentations": ACTIVE_AUGMENTATIONS[category],
             "synthetic_positives": (
                 SYNTHETIC_ANOMALY_POLICIES[category] if ENABLE_SYNTHETIC_EVIDENCE else ()
@@ -319,6 +334,8 @@ def export_normal_augmentation_audit() -> pd.DataFrame:
             "synthetic_evidence_weight": SYNTHETIC_EVIDENCE_WEIGHT,
             "clean_memory_patches": CLEAN_MEMORY_PATCHES,
             "augmented_memory_patches": AUGMENTED_MEMORY_PATCHES,
+            "neighborhood_degrees": NEIGHBORHOOD_DEGREES,
+            "selected_threshold_scale": SELECTED_THRESHOLD_SCALE,
         },
         sort_keys=True,
     )
@@ -419,8 +436,14 @@ def build_extractor(*, load_pretrained: bool) -> DinoV2PatchFeatureExtractor:
 
 
 @torch.inference_mode()
-def iter_memory_patch_batches(frame, extractor, augmentations):
-    """Yield DINOv2 patch batches for only the requested known-normal transformations."""
+def iter_memory_patch_batches(
+    frame: pd.DataFrame,
+    extractor: DinoV2PatchFeatureExtractor,
+    augmentations: tuple[str, ...],
+    *,
+    neighborhood_degree: int,
+):
+    """Yield one neighborhood degree of DINO tokens for known-normal transformations."""
     dataset = AnomalyImageDataset(frame, root=TRAIN_ROOT, image_size=IMAGE_SIZE)
     loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False, **loader_options)
     for images in loader:
@@ -428,7 +451,11 @@ def iter_memory_patch_batches(frame, extractor, augmentations):
         for augmentation in augmentations:
             transformed = apply_normal_augmentation(images, augmentation)
             with torch.autocast(DEVICE, dtype=AMP_DTYPE, enabled=DEVICE == "cuda"):
-                yield extractor(transformed).float().cpu()
+                embeddings = extractor(transformed).float()
+            yield aggregate_patch_neighborhoods(
+                embeddings,
+                kernel_size=neighborhood_degree,
+            ).cpu()
 
 
 def combined_memory_bank(
@@ -448,31 +475,34 @@ def score_frame(
     frame: pd.DataFrame,
     root: Path,
     extractor: DinoV2PatchFeatureExtractor,
-    clean_memory: torch.Tensor,
-    augmented_memory: torch.Tensor,
+    clean_memories: dict[int, torch.Tensor],
+    augmented_memories: dict[int, torch.Tensor],
     *,
     synthetic_method: str | None = None,
-) -> tuple[np.ndarray, torch.Tensor]:
-    """Return DINO image scores and six patch-distance features for rows in order.
+) -> tuple[np.ndarray, torch.Tensor, dict[int, np.ndarray]]:
+    """Return fused DINO scores, summary features, and per-degree scores.
 
     Args:
         frame: Metadata rows containing each image's relative path.
         root: Directory against which the relative paths are resolved.
         extractor: Frozen DINOv2 patch-token extractor.
-        clean_memory: Protected memory sampled only from original normal images.
-        augmented_memory: Separate memory sampled only from known-normal transforms.
+        clean_memories: Protected original-normal memory for every neighborhood degree.
+        augmented_memories: Known-normal transformed memory for every neighborhood degree.
         synthetic_method: Optional synthetic-positive transform applied before feature extraction.
 
     Returns:
-        A NumPy vector containing the top-1%-tail DINO score and a tensor containing six
-        patch-distance summaries per image. Synthetic images are scored against the same unchanged
-        normal memories as clean images.
+        The fused top-1%-tail score, six fused patch-distance summaries, and a mapping containing
+        each degree's standalone image scores. Fusion happens per patch before tail aggregation.
     """
     dataset = AnomalyImageDataset(frame, root=root, image_size=IMAGE_SIZE)
     loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False, **loader_options)
-    bank = combined_memory_bank(clean_memory, augmented_memory).to(DEVICE)
+    banks = {
+        degree: combined_memory_bank(clean_memories[degree], augmented_memories[degree]).to(DEVICE)
+        for degree in NEIGHBORHOOD_DEGREES
+    }
     scores = []
     feature_rows = []
+    degree_score_rows = {degree: [] for degree in NEIGHBORHOOD_DEGREES}
     for batch_index, images in enumerate(loader):
         if synthetic_method is not None:
             # MixUp needs a distinct partner. Supply the first dataset image if the final loader
@@ -492,17 +522,38 @@ def score_frame(
             images = transformed[:1] if single_mixup else transformed
         with torch.autocast(DEVICE, dtype=AMP_DTYPE, enabled=DEVICE == "cuda"):
             embeddings = extractor(images.to(DEVICE)).float()
-        features = patch_memory_features(
-            embeddings,
-            bank,
+        degree_distances = []
+        for degree in NEIGHBORHOOD_DEGREES:
+            aggregated = aggregate_patch_neighborhoods(embeddings, kernel_size=degree)
+            patch_distances = patch_memory_distances(
+                aggregated,
+                banks[degree],
+                distance_metric="cosine",
+                distance_chunk_size=DISTANCE_CHUNK_SIZE,
+            )
+            degree_distances.append(patch_distances)
+            degree_features = summarize_patch_distances(
+                patch_distances,
+                top_k=1,
+                top_fraction=TOP_FRACTION,
+            )
+            degree_score_rows[degree].extend(degree_features[:, -1].cpu().tolist())
+        fused_distances = torch.stack(degree_distances).mean(dim=0)
+        features = summarize_patch_distances(
+            fused_distances,
             top_k=1,
             top_fraction=TOP_FRACTION,
-            distance_metric="cosine",
-            distance_chunk_size=DISTANCE_CHUNK_SIZE,
         ).cpu()
         feature_rows.append(features)
         scores.extend(features[:, -1].tolist())
-    return np.asarray(scores, dtype=np.float64), torch.cat(feature_rows)
+    return (
+        np.asarray(scores, dtype=np.float64),
+        torch.cat(feature_rows),
+        {
+            degree: np.asarray(values, dtype=np.float64)
+            for degree, values in degree_score_rows.items()
+        },
+    )
 
 
 def combine_anomaly_evidence(
@@ -545,16 +596,32 @@ if RUN_TRAINING:
     category_artifacts = {}
     for category, category_rows in train_table.groupby("category", sort=True):
         split = make_split(category_rows, valid_size=NORMAL_VALID_SIZE, seed=SEED)
-        clean_memory = sample_memory_bank(
-            iter_memory_patch_batches(split.train, extractor, ("identity",)),
-            max_patches=CLEAN_MEMORY_PATCHES,
-            seed=SEED,
-        )
-        augmented_memory = sample_memory_bank(
-            iter_memory_patch_batches(split.train, extractor, ACTIVE_AUGMENTATIONS[category]),
-            max_patches=AUGMENTED_MEMORY_PATCHES,
-            seed=SEED + 1000,
-        )
+        clean_memories = {
+            degree: sample_memory_bank(
+                iter_memory_patch_batches(
+                    split.train,
+                    extractor,
+                    ("identity",),
+                    neighborhood_degree=degree,
+                ),
+                max_patches=CLEAN_MEMORY_PATCHES,
+                seed=SEED if degree == 1 else SEED + degree * 100,
+            )
+            for degree in NEIGHBORHOOD_DEGREES
+        }
+        augmented_memories = {
+            degree: sample_memory_bank(
+                iter_memory_patch_batches(
+                    split.train,
+                    extractor,
+                    ACTIVE_AUGMENTATIONS[category],
+                    neighborhood_degree=degree,
+                ),
+                max_patches=AUGMENTED_MEMORY_PATCHES,
+                seed=SEED + 1000 if degree == 1 else SEED + 1000 + degree * 100,
+            )
+            for degree in NEIGHBORHOOD_DEGREES
+        }
         evidence_head = None
         dino_score_std = 1.0
         positive_weight = SYNTHETIC_EVIDENCE_WEIGHT if ENABLE_SYNTHETIC_EVIDENCE else 0.0
@@ -565,12 +632,12 @@ if RUN_TRAINING:
                 valid_size=1.0 - EVIDENCE_TRAIN_FRACTION,
                 seed=SEED + 1,
             )
-            evidence_dino_scores, evidence_normal_features = score_frame(
+            evidence_dino_scores, evidence_normal_features, evidence_degree_scores = score_frame(
                 evidence_split.train,
                 TRAIN_ROOT,
                 extractor,
-                clean_memory,
-                augmented_memory,
+                clean_memories,
+                augmented_memories,
             )
             synthetic_training_features = torch.cat(
                 [
@@ -578,8 +645,8 @@ if RUN_TRAINING:
                         evidence_split.train,
                         TRAIN_ROOT,
                         extractor,
-                        clean_memory,
-                        augmented_memory,
+                        clean_memories,
+                        augmented_memories,
                         synthetic_method=method,
                     )[1]
                     for method in SYNTHETIC_ANOMALY_POLICIES[category]
@@ -599,12 +666,12 @@ if RUN_TRAINING:
             "positive_evidence_weight": positive_weight,
             "dino_score_std": dino_score_std,
         }
-        normal_dino_scores, normal_features = score_frame(
+        normal_dino_scores, normal_features, normal_degree_scores = score_frame(
             calibration_rows,
             TRAIN_ROOT,
             extractor,
-            clean_memory,
-            augmented_memory,
+            clean_memories,
+            augmented_memories,
         )
         normal_evidence, normal_scores = combine_anomaly_evidence(
             normal_dino_scores,
@@ -621,15 +688,25 @@ if RUN_TRAINING:
             normal_quantile=NORMAL_QUANTILES[category],
         )
         dino_only_threshold = select_anomaly_threshold(control_calibration, "normal_quantile")
+        native_normal_scores = (
+            np.concatenate((evidence_degree_scores[1], normal_degree_scores[1]))
+            if ENABLE_SYNTHETIC_EVIDENCE
+            else normal_degree_scores[1]
+        )
+        native_calibration = calibrate_anomaly_threshold(
+            native_normal_scores,
+            normal_quantile=NORMAL_QUANTILES[category],
+        )
+        native_threshold = select_anomaly_threshold(native_calibration, "normal_quantile")
         synthetic_score_parts = []
         if ENABLE_SYNTHETIC_EVIDENCE:
             for method in SYNTHETIC_ANOMALY_POLICIES[category]:
-                synthetic_dino_scores, synthetic_features = score_frame(
+                synthetic_dino_scores, synthetic_features, _ = score_frame(
                     calibration_rows,
                     TRAIN_ROOT,
                     extractor,
-                    clean_memory,
-                    augmented_memory,
+                    clean_memories,
+                    augmented_memories,
                     synthetic_method=method,
                 )
                 _, synthetic_scores = combine_anomaly_evidence(
@@ -656,16 +733,21 @@ if RUN_TRAINING:
                 "normal_validation_images": len(normal_scores),
                 "dino_only_validation_images": len(control_normal_scores),
                 "dino_only_threshold": dino_only_threshold,
+                "native_degree_one_threshold": native_threshold,
                 "evidence_training_images": (
                     len(evidence_split.train) if ENABLE_SYNTHETIC_EVIDENCE else 0
                 ),
-                "clean_memory_patches": len(clean_memory),
-                "augmented_memory_patches": len(augmented_memory),
+                "clean_memory_patches_by_degree": {
+                    degree: len(memory) for degree, memory in clean_memories.items()
+                },
+                "augmented_memory_patches_by_degree": {
+                    degree: len(memory) for degree, memory in augmented_memories.items()
+                },
             }
         )
         category_artifacts[category] = {
-            "clean_memory": clean_memory,
-            "augmented_memory": augmented_memory,
+            "clean_memories": clean_memories,
+            "augmented_memories": augmented_memories,
             "normal_augmentations": ACTIVE_AUGMENTATIONS[category],
             "synthetic_anomalies": (
                 SYNTHETIC_ANOMALY_POLICIES[category] if ENABLE_SYNTHETIC_EVIDENCE else ()
@@ -675,6 +757,7 @@ if RUN_TRAINING:
             "positive_evidence_weight": positive_weight,
             "dino_score_std": dino_score_std,
             "dino_only_threshold": dino_only_threshold,
+            "native_degree_one_threshold": native_threshold,
             "normal_quantile": NORMAL_QUANTILES[category],
             "calibration": calibration,
         }
@@ -686,10 +769,15 @@ if RUN_TRAINING:
                     SYNTHETIC_ANOMALY_POLICIES[category] if ENABLE_SYNTHETIC_EVIDENCE else ()
                 ),
                 "positive_evidence_weight": positive_weight,
-                "clean_memory": len(clean_memory),
-                "augmented_memory": len(augmented_memory),
+                "clean_memory_by_degree": {
+                    degree: len(memory) for degree, memory in clean_memories.items()
+                },
+                "augmented_memory_by_degree": {
+                    degree: len(memory) for degree, memory in augmented_memories.items()
+                },
                 "threshold": calibration["selected_threshold"],
                 "dino_only_control_threshold": dino_only_threshold,
+                "native_degree_one_threshold": native_threshold,
                 "normal_mean": calibration["normal_score_mean"],
                 "normal_std": calibration["normal_score_std"],
                 "normal_positive_evidence_mean": calibration["normal_positive_evidence_mean"],
@@ -702,6 +790,8 @@ if RUN_TRAINING:
         "model_name": MODEL_NAME,
         "image_size": IMAGE_SIZE,
         "top_fraction": TOP_FRACTION,
+        "neighborhood_degrees": NEIGHBORHOOD_DEGREES,
+        "selected_threshold_scale": SELECTED_THRESHOLD_SCALE,
         "synthetic_evidence_enabled": ENABLE_SYNTHETIC_EVIDENCE,
         "synthetic_evidence_weight": (
             SYNTHETIC_EVIDENCE_WEIGHT if ENABLE_SYNTHETIC_EVIDENCE else 0.0
@@ -731,6 +821,10 @@ else:
         raise ValueError("Loaded bundle does not match AUGMENTATION_PROFILE")
     if bundle["synthetic_evidence_enabled"] != ENABLE_SYNTHETIC_EVIDENCE:
         raise ValueError("Loaded bundle does not match ENABLE_SYNTHETIC_EVIDENCE")
+    if tuple(bundle["neighborhood_degrees"]) != NEIGHBORHOOD_DEGREES:
+        raise ValueError("Loaded bundle does not match NEIGHBORHOOD_DEGREES")
+    if bundle["selected_threshold_scale"] != SELECTED_THRESHOLD_SCALE:
+        raise ValueError("Loaded bundle does not match SELECTED_THRESHOLD_SCALE")
     extractor = build_extractor(load_pretrained=False)
     extractor.load_state_dict(bundle["model_state"])
     category_artifacts = bundle["categories"]
@@ -745,33 +839,46 @@ all_positive_evidence = np.zeros(len(test_table), dtype=np.float64)
 all_scores = np.zeros(len(test_table), dtype=np.float64)
 all_labels = np.zeros(len(test_table), dtype=np.int64)
 all_dino_only_labels = np.zeros(len(test_table), dtype=np.int64)
+all_native_only_labels = np.zeros(len(test_table), dtype=np.int64)
+all_degree_scores = {
+    degree: np.zeros(len(test_table), dtype=np.float64) for degree in NEIGHBORHOOD_DEGREES
+}
 for category, category_rows in test_table.groupby("category", sort=True):
     artifact = category_artifacts[category]
-    row_dino_scores, row_features = score_frame(
+    row_dino_scores, row_features, row_degree_scores = score_frame(
         category_rows,
         TEST_ROOT,
         extractor,
-        artifact["clean_memory"],
-        artifact["augmented_memory"],
+        artifact["clean_memories"],
+        artifact["augmented_memories"],
     )
     row_evidence, row_scores = combine_anomaly_evidence(
         row_dino_scores,
         row_features,
         artifact,
     )
-    threshold = artifact["calibration"]["selected_threshold"]
+    threshold = artifact["calibration"]["selected_threshold"] * SELECTED_THRESHOLD_SCALE
     positions = category_rows.index.to_numpy()
     all_dino_scores[positions] = row_dino_scores
     all_positive_evidence[positions] = row_evidence
     all_scores[positions] = row_scores
     all_labels[positions] = (row_scores >= threshold).astype(np.int64)
-    all_dino_only_labels[positions] = (row_dino_scores >= artifact["dino_only_threshold"]).astype(
-        np.int64
-    )
+    all_dino_only_labels[positions] = (
+        row_dino_scores >= artifact["dino_only_threshold"] * SELECTED_THRESHOLD_SCALE
+    ).astype(np.int64)
+    all_native_only_labels[positions] = (
+        row_degree_scores[1] >= artifact["native_degree_one_threshold"] * SELECTED_THRESHOLD_SCALE
+    ).astype(np.int64)
+    for degree, degree_scores in row_degree_scores.items():
+        all_degree_scores[degree][positions] = degree_scores
     print(
         category,
         {
             "threshold": threshold,
+            "threshold_scale": SELECTED_THRESHOLD_SCALE,
+            "degree_score_medians": {
+                degree: float(np.median(values)) for degree, values in row_degree_scores.items()
+            },
             "dino_score_median": float(np.median(row_dino_scores)),
             "positive_evidence_images": int((row_evidence > 0).sum()),
             "positive_evidence_max": float(row_evidence.max()),
@@ -781,6 +888,8 @@ for category, category_rows in test_table.groupby("category", sort=True):
     )
 
 audit = test_table.copy()
+for degree, degree_scores in all_degree_scores.items():
+    audit[f"dino_degree_{degree}_score"] = degree_scores
 audit["dino_score"] = all_dino_scores
 audit["positive_evidence"] = all_positive_evidence
 audit["combined_score"] = all_scores
@@ -820,8 +929,12 @@ submission, zip_path = write_submission_candidate(all_labels)
 if ENABLE_SYNTHETIC_EVIDENCE:
     control_submission, control_zip_path = write_submission_candidate(
         all_dino_only_labels,
-        tag="dino_only_control",
+        tag="multidegree_no_synthetic",
     )
+native_submission, native_zip_path = write_submission_candidate(
+    all_native_only_labels,
+    tag="native_degree_1_no_synthetic",
+)
 sync_artifacts(
     paths.output_dir,
     paths.persistent_dir,
@@ -832,33 +945,30 @@ if ENABLE_SYNTHETIC_EVIDENCE:
     print(
         control_zip_path,
         control_submission["label"].value_counts().to_dict(),
-        "Exact no-synthetic control from the same memories and complete outer validation split",
+        "Multi-degree no-synthetic ablation",
     )
+print(
+    native_zip_path,
+    native_submission["label"].value_counts().to_dict(),
+    "Native degree-1 no-synthetic ablation",
+)
 submission.head()
 
 # %% [markdown]
-# ## 8. Public threshold candidates with exact category counts
+# ## 8. Candidate interpretation
 #
-# Submit the main candidate first. These files require no retraining, but they are threshold-policy
-# experiments and should not be interpreted as augmentation ablations.
+# Threshold scale 0.85 is frozen from the previous run. The three candidates differ by method:
+# `main` uses multi-degree context plus synthetic evidence; `multidegree_no_synthetic` isolates
+# context; `native_degree_1_no_synthetic` removes both context and synthetic evidence. Do not resume
+# a dense scale sweep: submit these candidates to measure representation changes.
 
 # %%
-PUBLIC_SWEEP_SCALES = (0.90, 0.95, 1.05)
-if PHASE == "public":
-    for scale in PUBLIC_SWEEP_SCALES:
-        candidate_labels = np.zeros(len(test_table), dtype=np.int64)
-        category_counts = {}
-        for category, rows in test_table.groupby("category", sort=True):
-            artifact = category_artifacts[category]
-            threshold = artifact["calibration"]["selected_threshold"] * scale
-            labels = (all_scores[rows.index] >= threshold).astype(np.int64)
-            candidate_labels[rows.index] = labels
-            category_counts[category] = int(labels.sum())
-        _, candidate_zip = write_submission_candidate(
-            candidate_labels,
-            tag=f"global_scale_{scale:.2f}",
-        )
-        print(
-            candidate_zip,
-            {"scale": scale, "total": int(candidate_labels.sum()), "by_category": category_counts},
-        )
+candidate_summary = pd.DataFrame(
+    {
+        "candidate_main": all_labels,
+        "multidegree_no_synthetic": all_dino_only_labels,
+        "native_degree_1_no_synthetic": all_native_only_labels,
+    }
+).sum()
+print("Predicted anomalies by method at fixed scale 0.85:")
+print(candidate_summary)
