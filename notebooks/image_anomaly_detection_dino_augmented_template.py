@@ -1,12 +1,10 @@
 # %% [markdown]
-# # Task 2 - DINOv2 local-context scoring plus a synthetic patch adapter
+# # Task 2 - DINOv2 local-context scoring with three frozen 0.85 modes
 #
-# The preceding evidence candidate reached 0.769 at threshold scale 0.85. This experiment freezes
-# that selected scale and changes the representation instead of continuing threshold search. It
-# averages nearest-normal distances from native DINO patches (degree 1) and 3x3 locally aggregated
-# DINO patches (degree 3) before top-1% tail scoring. A category-specific patch classifier then
-# learns the exact local regions changed by CutMix, dark curves, and white lines. The final five
-# candidates use the already observed 0.85 winner's category counts, not another threshold sweep.
+# The preceding candidate reached 0.769 at threshold scale 0.85. This notebook freezes that scale
+# and exposes three controlled modes: the original public baseline, the private-inspection-driven
+# augmentation without TTA, and the same new augmentation with matched calibration-time TTA. Each
+# run trains or loads one isolated bundle and writes exactly one submission ZIP.
 
 # %% [markdown]
 # ## Colab bootstrap
@@ -49,7 +47,6 @@ from olp_ai_26.cv.anomaly_detection import (
     calibrate_anomaly_threshold,
     changed_patch_mask,
     fit_positive_evidence_head,
-    fixed_count_rank_fusion,
     load_official_training_table,
     patch_memory_distances,
     positive_evidence_scores,
@@ -64,15 +61,41 @@ from olp_ai_26.cv.anomaly_detection import (
 # %% [markdown]
 # ## 0. Run configuration
 #
-# `category_policy` restores the previous category-specific normal transforms. For the narrowest
-# ablation, choose `blur_only`. Neither profile creates anomaly labels.
+# Change only `EXPERIMENT_MODE` for the requested comparison. `category_policy` controls
+# known-normal memory transforms; `blur_only` is retained as a diagnostic. Neither normal profile
+# creates anomaly labels. The synthetic profile is selected by the mode and is not edited manually.
 
 # %%
 TEAM_NAME = "replace_team_name"
 TASK_NAME = "task2"
 PHASE = "public"  # public | private
 RUN_TRAINING = True
-EXPERIMENT_NAME = "anomalydino_patch_adapter_rank_fusion"
+# Choose exactly one. Train each mode on public first. The two new-augmentation modes can later be
+# rerun with PHASE="private" and RUN_TRAINING=False to load their frozen public bundles.
+EXPERIMENT_MODE = "085_new_aug_tta"
+EXPERIMENT_MODES = {
+    "085_original_public": {
+        "synthetic_profile": "original",
+        "tta": False,
+        "public_only": True,
+    },
+    "085_new_aug_no_tta": {
+        "synthetic_profile": "private_inspection_v1",
+        "tta": False,
+        "public_only": False,
+    },
+    "085_new_aug_tta": {
+        "synthetic_profile": "private_inspection_v1",
+        "tta": True,
+        "public_only": False,
+    },
+}
+if EXPERIMENT_MODE not in EXPERIMENT_MODES:
+    raise ValueError(f"EXPERIMENT_MODE must be one of {tuple(EXPERIMENT_MODES)}")
+MODE_CONFIG = EXPERIMENT_MODES[EXPERIMENT_MODE]
+SYNTHETIC_PROFILE = str(MODE_CONFIG["synthetic_profile"])
+ENABLE_TTA = bool(MODE_CONFIG["tta"])
+EXPERIMENT_NAME = f"anomalydino_{EXPERIMENT_MODE}"
 
 OFFICIAL_DATA_SOURCE = (
     Path("/content/drive/MyDrive/olpai26/ThiChinhThucData.zip")
@@ -112,29 +135,15 @@ SYNTHETIC_EVIDENCE_WEIGHT = 0.25
 EVIDENCE_TRAIN_FRACTION = 0.25
 EVIDENCE_NORMAL_MARGIN_QUANTILE = 0.95
 
-# The patch adapter is deliberately local: MixUp remains available to the image-level evidence
-# head but is excluded here because nearly every pixel changes and therefore has no reliable
-# negative/positive patch boundary. These caps bound both Colab RAM and logistic-regression time.
-ENABLE_PATCH_ADAPTER = True
-PATCH_ADAPTER_METHODS = ("cutmix", "dark_curve", "white_line")
+# The patch adapter is a diagnostic only and does not enter the accepted scale-0.85 score. Leave it
+# disabled for the three requested runs to save Colab time. If enabled for analysis, MixUp remains
+# excluded because nearly every pixel changes and has no credible local patch boundary.
+ENABLE_PATCH_ADAPTER = False
 PATCH_ADAPTER_FEATURES_PER_CLASS = 8192
-PATCH_ADAPTER_DIFFERENCE_THRESHOLD = 0.015
+PATCH_ADAPTER_FEATURES_PER_METHOD = 2048
+PATCH_ADAPTER_DIFFERENCE_THRESHOLD = 0.015 if SYNTHETIC_PROFILE == "original" else 0.008
 PATCH_ADAPTER_MASK_DILATION = 1
 PATCH_ADAPTER_NORMAL_MARGIN_QUANTILE = 0.95
-
-# The public 0.769 candidate at scale 0.85 called exactly these category totals. Rank fusion holds
-# that operating point fixed while testing whether local synthetic evidence improves which images
-# occupy those slots. On a 160-image private category the helper transfers the same proportion.
-REFERENCE_IMAGES_PER_CATEGORY = 80
-FIXED_ANOMALY_COUNTS = {
-    "category_01": 27,
-    "category_02": 25,
-    "category_03": 29,
-    "category_04": 40,
-    "category_05": 24,
-    "category_06": 44,
-}
-PATCH_BLEND_WEIGHTS = (0.20, 0.35, 0.50, 0.70, 1.00)
 
 SEED = 42
 NUM_WORKERS = 2
@@ -142,6 +151,8 @@ if PHASE not in {"public", "private"}:
     raise ValueError("PHASE must be 'public' or 'private'")
 if PHASE == "private" and RUN_TRAINING:
     raise ValueError("Private is inference-only: load the frozen public bundle")
+if bool(MODE_CONFIG["public_only"]) and PHASE != "public":
+    raise ValueError("085_original_public is intentionally restricted to the public phase")
 if AUGMENTATION_PROFILE not in {"category_policy", "blur_only"}:
     raise ValueError("AUGMENTATION_PROFILE must be 'category_policy' or 'blur_only'")
 if CLEAN_MEMORY_PATCHES < 1 or AUGMENTED_MEMORY_PATCHES < 1:
@@ -152,14 +163,8 @@ if SYNTHETIC_EVIDENCE_WEIGHT < 0:
     raise ValueError("SYNTHETIC_EVIDENCE_WEIGHT cannot be negative")
 if PATCH_ADAPTER_FEATURES_PER_CLASS < 1:
     raise ValueError("PATCH_ADAPTER_FEATURES_PER_CLASS must be positive")
-if not PATCH_ADAPTER_METHODS or not set(PATCH_ADAPTER_METHODS).issubset(
-    {"cutmix", "dark_curve", "white_line"}
-):
-    raise ValueError("PATCH_ADAPTER_METHODS must contain only local synthetic methods")
-if any(not 0 <= weight <= 1 for weight in PATCH_BLEND_WEIGHTS):
-    raise ValueError("PATCH_BLEND_WEIGHTS must stay in [0, 1]")
-if set(FIXED_ANOMALY_COUNTS) != set(f"category_{index:02d}" for index in range(1, 7)):
-    raise ValueError("FIXED_ANOMALY_COUNTS must define all six categories")
+if PATCH_ADAPTER_FEATURES_PER_METHOD < 1:
+    raise ValueError("PATCH_ADAPTER_FEATURES_PER_METHOD must be positive")
 if not NEIGHBORHOOD_DEGREES or any(
     degree < 1 or degree % 2 == 0 for degree in NEIGHBORHOOD_DEGREES
 ):
@@ -227,6 +232,18 @@ BLUR_ONLY_AUGMENTATIONS = {category: ("blur_mild",) for category in CATEGORIES}
 ACTIVE_AUGMENTATIONS = (
     CATEGORY_AUGMENTATIONS if AUGMENTATION_PROFILE == "category_policy" else BLUR_ONLY_AUGMENTATIONS
 )
+# Use only geometry already accepted as normal for that category. Categories 02, 04, and 06 keep
+# identity-only inference because brightness/color changes could erase real anomaly evidence.
+CATEGORY_TTA = {
+    "category_01": ("identity",),
+    "category_02": ("identity",),
+    "category_03": ("identity", "hflip", "vflip"),
+    "category_04": ("identity",),
+    "category_05": ("identity", "hflip", "vflip"),
+    "category_06": ("identity",),
+}
+if any(not methods or methods[0] != "identity" for methods in CATEGORY_TTA.values()):
+    raise ValueError("Every CATEGORY_TTA policy must begin with identity")
 NORMAL_QUANTILES = {
     "category_01": 0.99,
     "category_02": 0.975,
@@ -236,17 +253,47 @@ NORMAL_QUANTILES = {
     "category_06": 0.95,
 }
 
-# Blur stays in the normal-memory policy above. These four transformations are synthetic positives
-# only: they never enter either normal bank. Remove one name from a category tuple for a clean
-# method ablation. The weaker MixUp range is deliberate so the generated samples remain plausible.
-SYNTHETIC_ANOMALY_POLICIES = {
-    category: ("mixup", "cutmix", "dark_curve", "white_line") for category in CATEGORIES
-}
+# Blur and flips stay in the normal-memory policy above. Synthetic methods never enter either
+# normal bank. The original profile reproduces the previous public candidate exactly; the new
+# profile prioritizes MixUp and replaces strong black/straight marks with subtle colored curves.
+if SYNTHETIC_PROFILE == "original":
+    SYNTHETIC_METHODS = ("mixup", "cutmix", "dark_curve", "white_line")
+    PATCH_ADAPTER_METHODS = ("cutmix", "dark_curve", "white_line")
+    IMAGE_EVIDENCE_METHOD_WEIGHTS = {method: 0.25 for method in SYNTHETIC_METHODS}
+    PATCH_ADAPTER_METHOD_WEIGHTS = {method: 1 / 3 for method in PATCH_ADAPTER_METHODS}
+else:
+    SYNTHETIC_METHODS = ("mixup", "cutmix", "gray_curve", "white_curve")
+    PATCH_ADAPTER_METHODS = ("cutmix", "gray_curve", "white_curve")
+    IMAGE_EVIDENCE_METHOD_WEIGHTS = {
+        "mixup": 0.50,
+        "cutmix": 0.10,
+        "gray_curve": 0.20,
+        "white_curve": 0.20,
+    }
+    PATCH_ADAPTER_METHOD_WEIGHTS = {
+        "cutmix": 0.15,
+        "gray_curve": 0.425,
+        "white_curve": 0.425,
+    }
+SYNTHETIC_ANOMALY_POLICIES = {category: SYNTHETIC_METHODS for category in CATEGORIES}
 SYNTHETIC_PARAMETERS_BY_CATEGORY = {
     category: synthetic_anomaly_defaults() for category in CATEGORIES
 }
 for category_parameters in SYNTHETIC_PARAMETERS_BY_CATEGORY.values():
     category_parameters["mixup"]["mixup_alpha_range"] = (0.10, 0.25)
+    if SYNTHETIC_PROFILE != "original":
+        category_parameters["cutmix"].update(
+            {
+                "cutmix_area_range": (0.02, 0.07),
+                "cutmix_opacity_range": (0.04, 0.10),
+            }
+        )
+if not set(PATCH_ADAPTER_METHODS).issubset(set(SYNTHETIC_METHODS) - {"mixup"}):
+    raise ValueError("PATCH_ADAPTER_METHODS must be local methods from SYNTHETIC_METHODS")
+if not np.isclose(sum(IMAGE_EVIDENCE_METHOD_WEIGHTS.values()), 1.0):
+    raise ValueError("IMAGE_EVIDENCE_METHOD_WEIGHTS must sum to one")
+if not np.isclose(sum(PATCH_ADAPTER_METHOD_WEIGHTS.values()), 1.0):
+    raise ValueError("PATCH_ADAPTER_METHOD_WEIGHTS must sum to one")
 AUDIT_SYNTHETIC_METHODS = tuple(
     dict.fromkeys(
         (SYNTHETIC_ANOMALY_POLICIES[CATEGORIES[0]] if ENABLE_SYNTHETIC_EVIDENCE else ())
@@ -257,6 +304,8 @@ AUDIT_SYNTHETIC_METHODS = tuple(
 config_table = pd.DataFrame(
     {
         category: {
+            "experiment_mode": EXPERIMENT_MODE,
+            "synthetic_profile": SYNTHETIC_PROFILE,
             "model": MODEL_NAME,
             "image_size": IMAGE_SIZE,
             "clean_memory_patches": CLEAN_MEMORY_PATCHES,
@@ -272,7 +321,10 @@ config_table = pd.DataFrame(
             ),
             "patch_adapter_methods": PATCH_ADAPTER_METHODS if ENABLE_PATCH_ADAPTER else (),
             "patch_adapter_features_per_class": PATCH_ADAPTER_FEATURES_PER_CLASS,
+            "image_evidence_method_weights": IMAGE_EVIDENCE_METHOD_WEIGHTS,
+            "patch_adapter_method_weights": PATCH_ADAPTER_METHOD_WEIGHTS,
             "patch_adapter_mask_dilation": PATCH_ADAPTER_MASK_DILATION,
+            "tta_methods": CATEGORY_TTA[category] if ENABLE_TTA else ("identity",),
             "normal_quantile": NORMAL_QUANTILES[category],
             "distance": "cosine_1nn",
             "image_score": f"mean_top_{TOP_FRACTION:.2%}_patches",
@@ -381,7 +433,9 @@ def export_normal_augmentation_audit() -> pd.DataFrame:
     """
     payload = json.dumps(
         {
+            "experiment_mode": EXPERIMENT_MODE,
             "profile": AUGMENTATION_PROFILE,
+            "synthetic_profile": SYNTHETIC_PROFILE,
             "augmentations": ACTIVE_AUGMENTATIONS,
             "synthetic_evidence_enabled": ENABLE_SYNTHETIC_EVIDENCE,
             "synthetic_policies": SYNTHETIC_ANOMALY_POLICIES,
@@ -394,11 +448,14 @@ def export_normal_augmentation_audit() -> pd.DataFrame:
             "patch_adapter_enabled": ENABLE_PATCH_ADAPTER,
             "patch_adapter_methods": PATCH_ADAPTER_METHODS,
             "patch_adapter_features_per_class": PATCH_ADAPTER_FEATURES_PER_CLASS,
+            "patch_adapter_features_per_method": PATCH_ADAPTER_FEATURES_PER_METHOD,
+            "image_evidence_method_weights": IMAGE_EVIDENCE_METHOD_WEIGHTS,
+            "patch_adapter_method_weights": PATCH_ADAPTER_METHOD_WEIGHTS,
             "patch_adapter_difference_threshold": PATCH_ADAPTER_DIFFERENCE_THRESHOLD,
             "patch_adapter_mask_dilation": PATCH_ADAPTER_MASK_DILATION,
             "patch_adapter_normal_margin_quantile": PATCH_ADAPTER_NORMAL_MARGIN_QUANTILE,
-            "fixed_anomaly_counts": FIXED_ANOMALY_COUNTS,
-            "patch_blend_weights": PATCH_BLEND_WEIGHTS,
+            "tta_enabled": ENABLE_TTA,
+            "category_tta": CATEGORY_TTA,
         },
         sort_keys=True,
     )
@@ -550,30 +607,37 @@ def iter_synthetic_patch_batches(
     frame: pd.DataFrame,
     extractor: DinoV2PatchFeatureExtractor,
     category: str,
+    method: str | None = None,
 ):
     """Yield DINO tokens only from locally edited synthetic-positive regions.
 
-    Pixel differences create patch labels, so this iterator accepts CutMix, dark curves, and white
-    lines but intentionally rejects MixUp. A one-patch dilation supplies local context around thin
-    marks. The downstream streaming sampler keeps the total feature count bounded.
+    Pixel differences create patch labels, so this iterator accepts one configured local method but
+    intentionally rejects MixUp. A one-patch dilation supplies context around thin marks. Keeping
+    methods separate allows explicit total method weights rather than letting large CutMix regions
+    dominate merely because they contain more changed patches.
 
     Args:
         frame: Held-out normal rows used exclusively for adapter fitting.
         extractor: Frozen DINOv2 feature extractor.
         category: Category whose tuned synthetic parameters should be applied.
+        method: One local synthetic method. ``None`` preserves the original interleaved policy.
 
     Yields:
         Tensors shaped ``[1, selected_patches, embedding_dimensions]``.
     """
+    if method is not None and method not in PATCH_ADAPTER_METHODS:
+        raise ValueError(f"Patch method must be one of {PATCH_ADAPTER_METHODS}")
+    methods = PATCH_ADAPTER_METHODS if method is None else (method,)
     dataset = AnomalyImageDataset(frame, root=TRAIN_ROOT, image_size=IMAGE_SIZE)
     loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False, **loader_options)
     for batch_index, clean_images in enumerate(loader):
-        for method_index, method in enumerate(PATCH_ADAPTER_METHODS):
+        for current_method in methods:
+            method_index = PATCH_ADAPTER_METHODS.index(current_method)
             transformed = apply_synthetic_anomaly(
                 clean_images,
-                method,
+                current_method,
                 seed=SEED + batch_index * len(PATCH_ADAPTER_METHODS) + method_index,
-                **SYNTHETIC_PARAMETERS_BY_CATEGORY[category][method],
+                **SYNTHETIC_PARAMETERS_BY_CATEGORY[category][current_method],
             )
             with torch.autocast(DEVICE, dtype=AMP_DTYPE, enabled=DEVICE == "cuda"):
                 embeddings = extractor(transformed.to(DEVICE)).float()
@@ -615,6 +679,7 @@ def score_frame(
     *,
     synthetic_method: str | None = None,
     patch_adapter_head: dict[str, torch.Tensor | float] | None = None,
+    tta_method: str = "identity",
 ) -> tuple[np.ndarray, torch.Tensor, dict[int, np.ndarray], np.ndarray]:
     """Return fused DINO, summary, per-degree, and optional patch-adapter scores.
 
@@ -626,6 +691,8 @@ def score_frame(
         augmented_memories: Known-normal transformed memory for every neighborhood degree.
         synthetic_method: Optional synthetic-positive transform applied before feature extraction.
         patch_adapter_head: Optional logistic head evaluated independently on native patch tokens.
+        tta_method: Label-preserving view transform. Views are scored separately and averaged only
+            at image-score level, so rotated/flipped patch grids never become spatially misaligned.
 
     Returns:
         The fused top-1%-tail score, six fused patch-distance summaries, a mapping containing each
@@ -659,6 +726,7 @@ def score_frame(
                 ],
             )
             images = transformed[:1] if single_mixup else transformed
+        images = apply_normal_augmentation(images, tta_method)
         with torch.autocast(DEVICE, dtype=AMP_DTYPE, enabled=DEVICE == "cuda"):
             embeddings = extractor(images.to(DEVICE)).float()
         if patch_adapter_head is None:
@@ -734,6 +802,59 @@ def combine_anomaly_evidence(
     return evidence, base + weight * score_scale * evidence
 
 
+def score_frame_views(
+    frame: pd.DataFrame,
+    root: Path,
+    extractor: DinoV2PatchFeatureExtractor,
+    clean_memories: dict[int, torch.Tensor],
+    augmented_memories: dict[int, torch.Tensor],
+    artifact: dict[str, object],
+    *,
+    tta_methods: tuple[str, ...],
+    synthetic_method: str | None = None,
+) -> dict[str, object]:
+    """Score independent TTA views and average only image-level evidence.
+
+    This helper is used for both public calibration and test inference. Consequently, the TTA mode
+    never applies a single-view threshold to averaged multi-view scores.
+    """
+    view_results = []
+    for tta_method in tta_methods:
+        dino_scores, features, degree_scores, patch_scores = score_frame(
+            frame,
+            root,
+            extractor,
+            clean_memories,
+            augmented_memories,
+            synthetic_method=synthetic_method,
+            patch_adapter_head=artifact.get("patch_adapter_head"),
+            tta_method=tta_method,
+        )
+        evidence, combined_scores = combine_anomaly_evidence(dino_scores, features, artifact)
+        view_results.append(
+            {
+                "dino": dino_scores,
+                "evidence": evidence,
+                "combined": combined_scores,
+                "patch": patch_scores,
+                "degree": degree_scores,
+            }
+        )
+    return {
+        "dino": np.mean(np.stack([result["dino"] for result in view_results]), axis=0),
+        "evidence": np.mean(np.stack([result["evidence"] for result in view_results]), axis=0),
+        "combined": np.mean(np.stack([result["combined"] for result in view_results]), axis=0),
+        "patch": np.mean(np.stack([result["patch"] for result in view_results]), axis=0),
+        "degree": {
+            degree: np.mean(
+                np.stack([result["degree"][degree] for result in view_results]),
+                axis=0,
+            )
+            for degree in NEIGHBORHOOD_DEGREES
+        },
+    }
+
+
 # %% [markdown]
 # ## 5. Fit normal memories, synthetic evidence, local patch adapters, and thresholds
 #
@@ -741,7 +862,8 @@ def combine_anomaly_evidence(
 # of that held-out set trains the small six-feature logistic head and patch adapter; the remaining
 # 75% independently calibrates the legacy threshold. Adapter negatives are sampled from the already
 # protected clean and known-normal memories. Its positives contain only DINO tokens overlapping the
-# local synthetic edit mask. Threshold selection remains normal-only; rank fusion happens later.
+# local synthetic edit mask. Threshold selection remains normal-only and uses the exact inference
+# views of the selected mode, so TTA scores are never compared against a single-view threshold.
 
 # %%
 if RUN_TRAINING:
@@ -780,6 +902,7 @@ if RUN_TRAINING:
         patch_adapter_head = None
         patch_adapter_normal_count = 0
         patch_adapter_positive_count = 0
+        patch_adapter_method_counts = {}
         dino_score_std = 1.0
         positive_weight = SYNTHETIC_EVIDENCE_WEIGHT if ENABLE_SYNTHETIC_EVIDENCE else 0.0
         calibration_rows = split.valid
@@ -798,24 +921,35 @@ if RUN_TRAINING:
                 clean_memories,
                 augmented_memories,
             )
-            synthetic_training_features = torch.cat(
-                [
-                    score_frame(
-                        evidence_split.train,
-                        TRAIN_ROOT,
-                        extractor,
-                        clean_memories,
-                        augmented_memories,
-                        synthetic_method=method,
-                    )[1]
-                    for method in SYNTHETIC_ANOMALY_POLICIES[category]
-                ]
-            )
+            synthetic_training_parts = {
+                method: score_frame(
+                    evidence_split.train,
+                    TRAIN_ROOT,
+                    extractor,
+                    clean_memories,
+                    augmented_memories,
+                    synthetic_method=method,
+                )[1]
+                for method in SYNTHETIC_ANOMALY_POLICIES[category]
+            }
+            synthetic_training_features = torch.cat(list(synthetic_training_parts.values()))
+            image_synthetic_weights = None
+            if SYNTHETIC_PROFILE != "original":
+                image_synthetic_weights = torch.cat(
+                    [
+                        torch.full(
+                            (len(features),),
+                            IMAGE_EVIDENCE_METHOD_WEIGHTS[method] / len(features),
+                        )
+                        for method, features in synthetic_training_parts.items()
+                    ]
+                )
             evidence_head = fit_positive_evidence_head(
                 evidence_normal_features,
                 synthetic_training_features,
                 seed=SEED,
                 normal_margin_quantile=EVIDENCE_NORMAL_MARGIN_QUANTILE,
+                synthetic_weights=image_synthetic_weights,
             )
             dino_score_std = max(float(evidence_dino_scores.std()), 1e-6)
         if ENABLE_PATCH_ADAPTER:
@@ -827,20 +961,51 @@ if RUN_TRAINING:
                 max_patches=PATCH_ADAPTER_FEATURES_PER_CLASS,
                 seed=SEED + 2000,
             )
-            patch_positive_features = sample_memory_bank(
-                iter_synthetic_patch_batches(
-                    evidence_split.train,
-                    extractor,
-                    category,
-                ),
-                max_patches=PATCH_ADAPTER_FEATURES_PER_CLASS,
-                seed=SEED + 3000,
-            )
+            patch_synthetic_weights = None
+            if SYNTHETIC_PROFILE == "original":
+                patch_positive_features = sample_memory_bank(
+                    iter_synthetic_patch_batches(
+                        evidence_split.train,
+                        extractor,
+                        category,
+                    ),
+                    max_patches=PATCH_ADAPTER_FEATURES_PER_CLASS,
+                    seed=SEED + 3000,
+                )
+                patch_adapter_method_counts = {"interleaved": len(patch_positive_features)}
+            else:
+                patch_parts = {
+                    method: sample_memory_bank(
+                        iter_synthetic_patch_batches(
+                            evidence_split.train,
+                            extractor,
+                            category,
+                            method,
+                        ),
+                        max_patches=PATCH_ADAPTER_FEATURES_PER_METHOD,
+                        seed=SEED + 3000 + method_index * 100,
+                    )
+                    for method_index, method in enumerate(PATCH_ADAPTER_METHODS)
+                }
+                patch_positive_features = torch.cat(list(patch_parts.values()))
+                patch_synthetic_weights = torch.cat(
+                    [
+                        torch.full(
+                            (len(features),),
+                            PATCH_ADAPTER_METHOD_WEIGHTS[method] / len(features),
+                        )
+                        for method, features in patch_parts.items()
+                    ]
+                )
+                patch_adapter_method_counts = {
+                    method: len(features) for method, features in patch_parts.items()
+                }
             patch_adapter_head = fit_positive_evidence_head(
                 patch_normal_features,
                 patch_positive_features,
                 seed=SEED,
                 normal_margin_quantile=PATCH_ADAPTER_NORMAL_MARGIN_QUANTILE,
+                synthetic_weights=patch_synthetic_weights,
             )
             patch_adapter_normal_count = len(patch_normal_features)
             patch_adapter_positive_count = len(patch_positive_features)
@@ -848,35 +1013,30 @@ if RUN_TRAINING:
         artifact_for_scoring = {
             "positive_evidence_head": evidence_head,
             "positive_evidence_weight": positive_weight,
+            "patch_adapter_head": patch_adapter_head,
             "dino_score_std": dino_score_std,
         }
-        normal_dino_scores, normal_features, normal_degree_scores, _ = score_frame(
+        mode_tta_methods = CATEGORY_TTA[category] if ENABLE_TTA else ("identity",)
+        normal_view_scores = score_frame_views(
             calibration_rows,
             TRAIN_ROOT,
             extractor,
             clean_memories,
             augmented_memories,
-        )
-        normal_evidence, normal_scores = combine_anomaly_evidence(
-            normal_dino_scores,
-            normal_features,
             artifact_for_scoring,
+            tta_methods=mode_tta_methods,
         )
-        control_normal_scores = (
-            np.concatenate((evidence_dino_scores, normal_dino_scores))
-            if ENABLE_SYNTHETIC_EVIDENCE
-            else normal_dino_scores
-        )
+        normal_dino_scores = np.asarray(normal_view_scores["dino"])
+        normal_evidence = np.asarray(normal_view_scores["evidence"])
+        normal_scores = np.asarray(normal_view_scores["combined"])
+        normal_degree_scores = normal_view_scores["degree"]
+        control_normal_scores = normal_dino_scores
         control_calibration = calibrate_anomaly_threshold(
             control_normal_scores,
             normal_quantile=NORMAL_QUANTILES[category],
         )
         dino_only_threshold = select_anomaly_threshold(control_calibration, "normal_quantile")
-        native_normal_scores = (
-            np.concatenate((evidence_degree_scores[1], normal_degree_scores[1]))
-            if ENABLE_SYNTHETIC_EVIDENCE
-            else normal_degree_scores[1]
-        )
+        native_normal_scores = normal_degree_scores[1]
         native_calibration = calibrate_anomaly_threshold(
             native_normal_scores,
             normal_quantile=NORMAL_QUANTILES[category],
@@ -885,20 +1045,17 @@ if RUN_TRAINING:
         synthetic_score_parts = []
         if ENABLE_SYNTHETIC_EVIDENCE:
             for method in SYNTHETIC_ANOMALY_POLICIES[category]:
-                synthetic_dino_scores, synthetic_features, _, _ = score_frame(
+                synthetic_view_scores = score_frame_views(
                     calibration_rows,
                     TRAIN_ROOT,
                     extractor,
                     clean_memories,
                     augmented_memories,
+                    artifact_for_scoring,
+                    tta_methods=mode_tta_methods,
                     synthetic_method=method,
                 )
-                _, synthetic_scores = combine_anomaly_evidence(
-                    synthetic_dino_scores,
-                    synthetic_features,
-                    artifact_for_scoring,
-                )
-                synthetic_score_parts.append(synthetic_scores)
+                synthetic_score_parts.append(np.asarray(synthetic_view_scores["combined"]))
         synthetic_scores = np.concatenate(synthetic_score_parts) if synthetic_score_parts else None
         calibration = calibrate_anomaly_threshold(
             normal_scores,
@@ -925,6 +1082,8 @@ if RUN_TRAINING:
                 ),
                 "patch_adapter_normal_features": patch_adapter_normal_count,
                 "patch_adapter_positive_features": patch_adapter_positive_count,
+                "patch_adapter_method_counts": patch_adapter_method_counts,
+                "tta_methods": mode_tta_methods,
                 "clean_memory_patches_by_degree": {
                     degree: len(memory) for degree, memory in clean_memories.items()
                 },
@@ -945,12 +1104,16 @@ if RUN_TRAINING:
             "positive_evidence_weight": positive_weight,
             "patch_adapter_head": patch_adapter_head,
             "patch_adapter_methods": PATCH_ADAPTER_METHODS if ENABLE_PATCH_ADAPTER else (),
+            "image_evidence_method_weights": IMAGE_EVIDENCE_METHOD_WEIGHTS,
+            "patch_adapter_method_weights": PATCH_ADAPTER_METHOD_WEIGHTS,
             "patch_adapter_normal_features": patch_adapter_normal_count,
             "patch_adapter_positive_features": patch_adapter_positive_count,
+            "patch_adapter_method_counts": patch_adapter_method_counts,
             "dino_score_std": dino_score_std,
             "dino_only_threshold": dino_only_threshold,
             "native_degree_one_threshold": native_threshold,
             "normal_quantile": NORMAL_QUANTILES[category],
+            "tta_methods": mode_tta_methods,
             "calibration": calibration,
         }
         print(
@@ -965,7 +1128,9 @@ if RUN_TRAINING:
                 "patch_adapter_feature_counts": {
                     "normal": patch_adapter_normal_count,
                     "positive": patch_adapter_positive_count,
+                    "by_method": patch_adapter_method_counts,
                 },
+                "tta_methods": mode_tta_methods,
                 "clean_memory_by_degree": {
                     degree: len(memory) for degree, memory in clean_memories.items()
                 },
@@ -983,7 +1148,11 @@ if RUN_TRAINING:
         )
     bundle = {
         "experiment_name": EXPERIMENT_NAME,
+        "experiment_mode": EXPERIMENT_MODE,
         "augmentation_profile": AUGMENTATION_PROFILE,
+        "synthetic_profile": SYNTHETIC_PROFILE,
+        "tta_enabled": ENABLE_TTA,
+        "category_tta": CATEGORY_TTA,
         "model_name": MODEL_NAME,
         "image_size": IMAGE_SIZE,
         "top_fraction": TOP_FRACTION,
@@ -996,11 +1165,12 @@ if RUN_TRAINING:
         "patch_adapter_enabled": ENABLE_PATCH_ADAPTER,
         "patch_adapter_methods": PATCH_ADAPTER_METHODS if ENABLE_PATCH_ADAPTER else (),
         "patch_adapter_features_per_class": PATCH_ADAPTER_FEATURES_PER_CLASS,
+        "patch_adapter_features_per_method": PATCH_ADAPTER_FEATURES_PER_METHOD,
+        "image_evidence_method_weights": IMAGE_EVIDENCE_METHOD_WEIGHTS,
+        "patch_adapter_method_weights": PATCH_ADAPTER_METHOD_WEIGHTS,
         "patch_adapter_difference_threshold": PATCH_ADAPTER_DIFFERENCE_THRESHOLD,
         "patch_adapter_mask_dilation": PATCH_ADAPTER_MASK_DILATION,
         "patch_adapter_normal_margin_quantile": PATCH_ADAPTER_NORMAL_MARGIN_QUANTILE,
-        "fixed_anomaly_counts": FIXED_ANOMALY_COUNTS,
-        "patch_blend_weights": PATCH_BLEND_WEIGHTS,
         "seed": SEED,
         "model_state": model_state,
         "categories": category_artifacts,
@@ -1022,8 +1192,14 @@ else:
     bundle = torch.load(BUNDLE_PATH, map_location="cpu", weights_only=True)
     if bundle["experiment_name"] != EXPERIMENT_NAME:
         raise ValueError("Loaded bundle does not match EXPERIMENT_NAME")
+    if bundle["experiment_mode"] != EXPERIMENT_MODE:
+        raise ValueError("Loaded bundle does not match EXPERIMENT_MODE")
     if bundle["augmentation_profile"] != AUGMENTATION_PROFILE:
         raise ValueError("Loaded bundle does not match AUGMENTATION_PROFILE")
+    if bundle["synthetic_profile"] != SYNTHETIC_PROFILE:
+        raise ValueError("Loaded bundle does not match SYNTHETIC_PROFILE")
+    if bundle["tta_enabled"] != ENABLE_TTA:
+        raise ValueError("Loaded bundle does not match ENABLE_TTA")
     if bundle["synthetic_evidence_enabled"] != ENABLE_SYNTHETIC_EVIDENCE:
         raise ValueError("Loaded bundle does not match ENABLE_SYNTHETIC_EVIDENCE")
     if bundle["patch_adapter_enabled"] != ENABLE_PATCH_ADAPTER:
@@ -1034,6 +1210,12 @@ else:
         raise ValueError("Loaded bundle does not match PATCH_ADAPTER_METHODS")
     if bundle["patch_adapter_features_per_class"] != PATCH_ADAPTER_FEATURES_PER_CLASS:
         raise ValueError("Loaded bundle does not match PATCH_ADAPTER_FEATURES_PER_CLASS")
+    if bundle["patch_adapter_features_per_method"] != PATCH_ADAPTER_FEATURES_PER_METHOD:
+        raise ValueError("Loaded bundle does not match PATCH_ADAPTER_FEATURES_PER_METHOD")
+    if bundle["image_evidence_method_weights"] != IMAGE_EVIDENCE_METHOD_WEIGHTS:
+        raise ValueError("Loaded bundle does not match IMAGE_EVIDENCE_METHOD_WEIGHTS")
+    if bundle["patch_adapter_method_weights"] != PATCH_ADAPTER_METHOD_WEIGHTS:
+        raise ValueError("Loaded bundle does not match PATCH_ADAPTER_METHOD_WEIGHTS")
     if bundle["patch_adapter_difference_threshold"] != PATCH_ADAPTER_DIFFERENCE_THRESHOLD:
         raise ValueError("Loaded bundle does not match PATCH_ADAPTER_DIFFERENCE_THRESHOLD")
     if bundle["patch_adapter_mask_dilation"] != PATCH_ADAPTER_MASK_DILATION:
@@ -1058,26 +1240,32 @@ all_positive_evidence = np.zeros(len(test_table), dtype=np.float64)
 all_patch_adapter_scores = np.zeros(len(test_table), dtype=np.float64)
 all_scores = np.zeros(len(test_table), dtype=np.float64)
 all_labels = np.zeros(len(test_table), dtype=np.int64)
-all_dino_only_labels = np.zeros(len(test_table), dtype=np.int64)
-all_native_only_labels = np.zeros(len(test_table), dtype=np.int64)
 all_degree_scores = {
     degree: np.zeros(len(test_table), dtype=np.float64) for degree in NEIGHBORHOOD_DEGREES
 }
 for category, category_rows in test_table.groupby("category", sort=True):
     artifact = category_artifacts[category]
-    row_dino_scores, row_features, row_degree_scores, row_patch_adapter_scores = score_frame(
+    expected_tta_methods = CATEGORY_TTA[category] if ENABLE_TTA else ("identity",)
+    artifact_tta_methods = tuple(artifact["tta_methods"])
+    if artifact_tta_methods != expected_tta_methods:
+        raise ValueError(
+            f"{category} bundle TTA methods {artifact_tta_methods} do not match "
+            f"selected mode {expected_tta_methods}"
+        )
+    view_scores = score_frame_views(
         category_rows,
         TEST_ROOT,
         extractor,
         artifact["clean_memories"],
         artifact["augmented_memories"],
-        patch_adapter_head=artifact["patch_adapter_head"],
-    )
-    row_evidence, row_scores = combine_anomaly_evidence(
-        row_dino_scores,
-        row_features,
         artifact,
+        tta_methods=artifact_tta_methods,
     )
+    row_dino_scores = np.asarray(view_scores["dino"])
+    row_evidence = np.asarray(view_scores["evidence"])
+    row_patch_adapter_scores = np.asarray(view_scores["patch"])
+    row_scores = np.asarray(view_scores["combined"])
+    row_degree_scores = view_scores["degree"]
     threshold = artifact["calibration"]["selected_threshold"] * SELECTED_THRESHOLD_SCALE
     positions = category_rows.index.to_numpy()
     all_dino_scores[positions] = row_dino_scores
@@ -1085,12 +1273,6 @@ for category, category_rows in test_table.groupby("category", sort=True):
     all_patch_adapter_scores[positions] = row_patch_adapter_scores
     all_scores[positions] = row_scores
     all_labels[positions] = (row_scores >= threshold).astype(np.int64)
-    all_dino_only_labels[positions] = (
-        row_dino_scores >= artifact["dino_only_threshold"] * SELECTED_THRESHOLD_SCALE
-    ).astype(np.int64)
-    all_native_only_labels[positions] = (
-        row_degree_scores[1] >= artifact["native_degree_one_threshold"] * SELECTED_THRESHOLD_SCALE
-    ).astype(np.int64)
     for degree, degree_scores in row_degree_scores.items():
         all_degree_scores[degree][positions] = degree_scores
     print(
@@ -1098,6 +1280,7 @@ for category, category_rows in test_table.groupby("category", sort=True):
         {
             "threshold": threshold,
             "threshold_scale": SELECTED_THRESHOLD_SCALE,
+            "tta_methods": artifact_tta_methods,
             "degree_score_medians": {
                 degree: float(np.median(values)) for degree, values in row_degree_scores.items()
             },
@@ -1106,7 +1289,7 @@ for category, category_rows in test_table.groupby("category", sort=True):
             "positive_evidence_max": float(row_evidence.max()),
             "patch_adapter_score_median": float(np.median(row_patch_adapter_scores)),
             "patch_adapter_score_max": float(row_patch_adapter_scores.max()),
-            "base_patch_spearman": float(
+            "combined_patch_spearman": float(
                 pd.Series(row_scores).corr(pd.Series(row_patch_adapter_scores), method="spearman")
             ),
             "combined_score_median": float(np.median(row_scores)),
@@ -1121,9 +1304,10 @@ audit["dino_score"] = all_dino_scores
 audit["positive_evidence"] = all_positive_evidence
 audit["patch_adapter_score"] = all_patch_adapter_scores
 audit["combined_score"] = all_scores
-audit["label_scale_085"] = all_labels
-audit["label_multidegree_no_synthetic"] = all_dino_only_labels
-audit["label_native_degree_1_no_synthetic"] = all_native_only_labels
+audit["experiment_mode"] = EXPERIMENT_MODE
+audit["synthetic_profile"] = SYNTHETIC_PROFILE
+audit["tta_enabled"] = ENABLE_TTA
+audit["label"] = all_labels
 
 # %% [markdown]
 # ## 7. Exact submission writer
@@ -1154,75 +1338,53 @@ def write_submission_candidate(
     return submission, zip_path
 
 
-def transferred_anomaly_count(category: str, category_size: int) -> int:
-    """Transfer the winning public candidate's category prevalence to the current phase size."""
-    return round(FIXED_ANOMALY_COUNTS[category] * category_size / REFERENCE_IMAGES_PER_CATEGORY)
-
-
-rank_candidates = {
-    weight: np.zeros(len(test_table), dtype=np.int64) for weight in PATCH_BLEND_WEIGHTS
-}
-rank_fused_scores = {
-    weight: np.zeros(len(test_table), dtype=np.float64) for weight in PATCH_BLEND_WEIGHTS
-}
-for category, category_rows in test_table.groupby("category", sort=True):
-    positions = category_rows.index.to_numpy()
-    anomaly_count = transferred_anomaly_count(category, len(category_rows))
-    for weight in PATCH_BLEND_WEIGHTS:
-        labels, fused_ranks = fixed_count_rank_fusion(
-            all_scores[positions],
-            all_patch_adapter_scores[positions],
-            anomaly_count=anomaly_count,
-            patch_weight=weight,
-        )
-        rank_candidates[weight][positions] = labels
-        rank_fused_scores[weight][positions] = fused_ranks
-
-candidate_outputs = {}
-for weight, labels in rank_candidates.items():
-    tag = f"rank_patch_w{weight:.2f}"
-    candidate_outputs[weight] = write_submission_candidate(labels, tag=tag)
-    audit[f"rank_fused_w{weight:.2f}"] = rank_fused_scores[weight]
-    audit[f"label_rank_patch_w{weight:.2f}"] = labels
-
+submission, submission_zip_path = write_submission_candidate(
+    all_labels,
+    tag=EXPERIMENT_MODE,
+)
 audit.to_csv(EXPERIMENT_DIR / f"{TASK_NAME}_{PHASE}_scores.csv", index=False)
 sync_artifacts(
     paths.output_dir,
     paths.persistent_dir,
     patterns=("*.pt", "*.json", "*.csv", "*.zip"),
 )
-for weight, (candidate, candidate_zip_path) in candidate_outputs.items():
-    print(
-        candidate_zip_path,
-        "patch_weight=",
-        weight,
-        "total=",
-        int(candidate["label"].sum()),
-        "by_category=",
-        candidate.groupby("category")["label"].sum().to_dict(),
-    )
-recommended_submission = candidate_outputs[0.35][0]
-recommended_submission.head()
+print(
+    submission_zip_path,
+    "mode=",
+    EXPERIMENT_MODE,
+    "synthetic_profile=",
+    SYNTHETIC_PROFILE,
+    "threshold_scale=",
+    SELECTED_THRESHOLD_SCALE,
+    "tta=",
+    ENABLE_TTA,
+    "total=",
+    int(submission["label"].sum()),
+    "by_category=",
+    submission.groupby("category")["label"].sum().to_dict(),
+)
+submission.head()
 
 # %% [markdown]
-# ## 8. Candidate interpretation
+# ## 8. Mode interpretation
 #
-# Every candidate retains the exact per-category anomaly count reached by the 0.769 submission.
-# Only the ranking changes. A weight of 0.20 stays close to the DINO plus image-level evidence
-# baseline; 1.00 is a patch-adapter-only stress test. Submit 0.35 first, then 0.50. If either beats
-# 0.769, spend the remaining slots bracketing the better weight; otherwise use 0.20 and 0.70 to
-# diagnose whether the local signal is useful. This is a controlled rank blend, not scale tuning.
+# Each run produces one ZIP. Compare the three modes as separate Colab runs; do not reuse a bundle
+# across modes. The TTA mode averages identity/horizontal/vertical views only for categories 03 and
+# 05, and its threshold was calibrated with those same views. All modes use threshold scale 0.85.
 
 # %%
 candidate_summary = pd.DataFrame(
-    {
-        f"rank_patch_w{weight:.2f}": {
-            "patch_weight": weight,
-            "predicted_anomalies": int(labels.sum()),
-            "changes_vs_scale_085": int((labels != all_labels).sum()),
+    [
+        {
+            "experiment_mode": EXPERIMENT_MODE,
+            "phase": PHASE,
+            "synthetic_profile": SYNTHETIC_PROFILE,
+            "threshold_scale": SELECTED_THRESHOLD_SCALE,
+            "tta": ENABLE_TTA,
+            "predicted_anomalies": int(all_labels.sum()),
+            "submission_zip": str(submission_zip_path),
         }
-        for weight, labels in rank_candidates.items()
-    }
-).T
-print("Five fixed-count rank-fusion candidates (recommended first: w0.35):")
-print(candidate_summary.sort_values("patch_weight"))
+    ]
+).set_index("experiment_mode")
+print("Completed one isolated mode; change EXPERIMENT_MODE and rerun for the next candidate.")
+print(candidate_summary)

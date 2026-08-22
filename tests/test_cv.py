@@ -167,7 +167,15 @@ def test_anomaly_feature_memory_and_calibration(tmp_path):
     assert augmented.min() >= 0 and augmented.max() <= 1
     normal_blur = apply_normal_augmentation(image.unsqueeze(0), "blur_mild")
     assert normal_blur.shape == image.unsqueeze(0).shape
-    for synthetic_name in ("cutpaste", "mixup", "cutmix", "dark_curve", "white_line"):
+    for synthetic_name in (
+        "cutpaste",
+        "mixup",
+        "cutmix",
+        "dark_curve",
+        "white_line",
+        "gray_curve",
+        "white_curve",
+    ):
         synthetic = apply_synthetic_anomaly(
             image.unsqueeze(0).repeat(2, 1, 1, 1), synthetic_name, seed=42
         )
@@ -197,10 +205,14 @@ def test_anomaly_feature_memory_and_calibration(tmp_path):
     defaults = synthetic_anomaly_defaults()
     assert "blur" not in defaults
     assert defaults["cutmix"]["cutmix_opacity_range"] == (0.06, 0.14)
+    assert defaults["gray_curve"]["curve_opacity_range"] == (0.10, 0.25)
+    assert defaults["white_curve"]["curve_color_range"] == (0.85, 1.00)
     marked_source = torch.full((2, 3, 64, 64), 0.4)
     internal_curve = apply_synthetic_anomaly(marked_source, "dark_curve", seed=42)
     internal_line = apply_synthetic_anomaly(marked_source, "white_line", seed=42)
-    for marked in (internal_curve, internal_line):
+    gray_curve = apply_synthetic_anomaly(marked_source, "gray_curve", seed=42)
+    white_curve = apply_synthetic_anomaly(marked_source, "white_curve", seed=42)
+    for marked in (internal_curve, internal_line, gray_curve, white_curve):
         assert torch.equal(marked[:, :, 0, :], marked_source[:, :, 0, :])
         assert torch.equal(marked[:, :, -1, :], marked_source[:, :, -1, :])
         assert torch.equal(marked[:, :, :, 0], marked_source[:, :, :, 0])
@@ -221,6 +233,13 @@ def test_anomaly_feature_memory_and_calibration(tmp_path):
     )
     assert torch.all(evidence >= 0)
     assert evidence[2:].mean() > evidence[:2].mean()
+    weighted_head = fit_positive_evidence_head(
+        normal_head_features,
+        synthetic_head_features,
+        seed=42,
+        synthetic_weights=torch.tensor([0.9, 0.1]),
+    )
+    assert torch.isfinite(weighted_head["coefficient"]).all()
 
 
 def test_changed_patch_mask_preserves_thin_edits_and_dilates_context():

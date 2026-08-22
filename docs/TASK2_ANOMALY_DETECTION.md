@@ -212,12 +212,20 @@ scale 0.85:
 
 These are representation/evidence ablations, not another threshold sweep.
 
-### Current next run: local patch adapter with fixed-count rank fusion
+### Current run: three isolated 0.85 modes
 
-The current `image_anomaly_detection_dino_augmented_template.ipynb` keeps the 0.769 pipeline as its
-base ranking and adds one lightweight category-specific logistic classifier over frozen native
-DINO patch tokens. It does not fine-tune DINO. This makes the extra run practical on Colab while
-testing the data-driven defect directions more directly than the six-statistic image head.
+The current `image_anomaly_detection_dino_augmented_template.ipynb` keeps threshold scale 0.85 and
+does not fine-tune DINO. Select exactly one mode near the top of the notebook:
+
+| `EXPERIMENT_MODE` | Synthetic positives | TTA | Intended use |
+|---|---|---|---|
+| `085_original_public` | MixUp, original CutMix, dark curve, white line | No | Reproduce the accepted public baseline |
+| `085_new_aug_no_tta` | MixUp-first, subtle CutMix, gray curve, white curve | No | Measure the new augmentation only |
+| `085_new_aug_tta` | Same new profile | Category-safe flips | Measure new augmentation plus matched TTA |
+
+Every mode has its own experiment directory and frozen bundle, and every run writes exactly one
+submission ZIP. The original mode is intentionally public-only. Train each new mode on public with
+`RUN_TRAINING=True`; the resulting frozen bundle can then be loaded for private inference.
 
 Adapter labels are generated in pixel space:
 
@@ -227,41 +235,38 @@ changed_patches = adaptive_max_pool(changed_pixels, dino_grid) >= 0.015
 changed_patches = dilate(changed_patches, radius=1)
 ```
 
-Changed patches from low-opacity CutMix, short dark curves, and thin white lines are positive.
+Changed patches from low-opacity CutMix and short gray/white curves are positive in the new modes.
 Patches from clean images and all configured known-normal transformations, including mild blur, are
 negative. `mixup` remains available to the image-level synthetic-evidence head but is deliberately
 excluded from the patch adapter: MixUp changes almost the entire image, so it cannot produce a
 credible local defect mask.
 
-The adapter uses at most 8,192 normal and 8,192 positive tokens per category. Its inference score
-is the mean of the highest 1% non-negative patch logits. That score is not added in raw units to
-DINO distance. Instead, both signals are converted to within-category ordinal percentile ranks:
+`ENABLE_PATCH_ADAPTER` is `False` for the three requested runs because its score does not enter the
+accepted 0.85 decision and fitting it wastes contest time. It remains available as a diagnostic:
+the original adapter uses at most 8,192 normal and 8,192 interleaved positive tokens per category,
+while the new modes cap each local method at 2,048 tokens. Its inference score is the mean of the
+highest 1% non-negative patch logits. The submitted decision uses the calibrated DINO plus
+non-negative image-evidence score from the accepted 0.85 pipeline.
 
 ```python
-fused_rank = (1 - patch_weight) * base_rank + patch_weight * patch_adapter_rank
+IMAGE_EVIDENCE_METHOD_WEIGHTS = {
+    "mixup": 0.50,
+    "cutmix": 0.10,
+    "gray_curve": 0.20,
+    "white_curve": 0.20,
+}
+PATCH_ADAPTER_METHOD_WEIGHTS = {
+    "cutmix": 0.15,
+    "gray_curve": 0.425,
+    "white_curve": 0.425,
+}
 ```
 
-The notebook then selects an exact anomaly count for every category. For the 80-image public set,
-the counts are copied from the winning scale-0.85 submission: `{27, 25, 29, 40, 24, 44}`, totaling
-189. This holds the decision operating point constant and tests only which samples should occupy
-those anomaly slots. For a 160-image private category, the notebook transfers the same proportion.
-
-One run produces exactly five new ZIP candidates:
-
-| Candidate | Patch weight | Purpose |
-|---|---:|---|
-| `rank_patch_w0.20` | 0.20 | Conservative base-dominant blend |
-| `rank_patch_w0.35` | 0.35 | Recommended first submission |
-| `rank_patch_w0.50` | 0.50 | Equal-rank blend; recommended second |
-| `rank_patch_w0.70` | 0.70 | Patch-dominant diagnostic |
-| `rank_patch_w1.00` | 1.00 | Patch-only stress test |
-
-The score audit adds `patch_adapter_score`, every fused-rank column, and every candidate label. It
-also prints the base/patch Spearman correlation by category and verifies the exact candidate counts.
-If `w0.35` or `w0.50` improves on 0.769, use the remaining submissions around the better side. If
-neither improves, the conservative `w0.20` and diagnostic `w0.70` reveal whether the local signal is
-weak or merely overweighted. Do not interpret this five-point method comparison as threshold-scale
-tuning: all five candidates have the same class totals.
+The notebook no longer copies a fixed public anomaly count or performs rank fusion. Every mode uses
+its own held-out-normal threshold multiplied by 0.85. Categories 03 and 05 use identity, horizontal
+flip, and vertical flip in the TTA mode; the other categories stay identity-only. Crucially, the
+TTA mode averages these views during both calibration and inference. A single-view threshold is
+never applied to a TTA-averaged score.
 
 ## Persisted augmentation audit
 
@@ -270,9 +275,8 @@ The notebook defaults to:
 ```python
 PERSISTENT_DIR = Path("/content/drive/MyDrive/olpai26/task2_artifacts")
 PERSIST_AUGMENTATION_AUDIT = True
-AUGMENTATION_AUDIT_MODE = "sample"  # sample | all
 AUGMENTATION_AUDIT_SAMPLES = 4
-SHOW_ALL_AUGMENTATION_PLOTS = True
+SHOW_AUGMENTATION_PLOTS = True
 ```
 
 Before feature extraction it writes originals, every configured normal transform, every synthetic
@@ -283,25 +287,27 @@ All six category contact sheets are also rendered directly in the notebook. Use 
 during contest iteration. `mode="all"` persists every transform in bounded batches but can create
 tens of thousands of PNGs and make Drive synchronization slow.
 
-Tune severity through `DEFAULT_SYNTHETIC_PARAMETERS`:
+The original profile keeps the previously tested defaults. The new profile uses these private-
+inspection-driven severities:
 
 ```python
-DEFAULT_SYNTHETIC_PARAMETERS = {
-    "cutpaste": {"cutpaste_area_range": (0.03, 0.15)},
-    "mixup": {"mixup_alpha_range": (0.10, 0.25)},  # DINO candidate override
+SYNTHETIC_PARAMETERS_BY_CATEGORY = {
+    "mixup": {"mixup_alpha_range": (0.10, 0.25)},
     "cutmix": {
-        "cutmix_area_range": (0.025, 0.10),
-        "cutmix_opacity_range": (0.06, 0.14),
+        "cutmix_area_range": (0.02, 0.07),
+        "cutmix_opacity_range": (0.04, 0.10),
     },
-    "dark_curve": {
-        "curve_length_fraction_range": (0.08, 0.16),
-        "curve_width_fraction": 0.012,
-        "curve_darkness": 0.75,
+    "gray_curve": {
+        "colored_curve_length_fraction_range": (0.06, 0.14),
+        "colored_curve_width_fraction": 0.004,
+        "curve_color_range": (0.50, 0.75),
+        "curve_opacity_range": (0.10, 0.25),
     },
-    "white_line": {
-        "line_length_fraction_range": (0.05, 0.10),
-        "line_width_fraction": 0.002,
-        "line_opacity": 1.0,
+    "white_curve": {
+        "colored_curve_length_fraction_range": (0.06, 0.14),
+        "colored_curve_width_fraction": 0.0035,
+        "curve_color_range": (0.85, 1.00),
+        "curve_opacity_range": (0.08, 0.22),
     },
 }
 ```
@@ -328,18 +334,17 @@ scoring is too slow, reduce `max_memory_patches`; this has the largest direct ef
 
 The original template's inference CSV records `patchcore_score`, standardized `patchcore_z`,
 non-negative `positive_evidence`, `combined_score`, and final `label`. The DINO augmented notebook
-records `dino_score`, `positive_evidence`, `patch_adapter_score`, `combined_score`, every candidate's
-fused rank, and every candidate label. Use these columns to check whether a submission changed
+records `dino_score`, `positive_evidence`, `patch_adapter_score`, `combined_score`, the selected
+mode/profile/TTA flags, and the final label. Use these columns to check whether a submission changed
 because of open-set distance, image-level known-defect evidence, or localized patch evidence. The
 submitted CSV still contains only the three official columns.
 
 ## Public threshold experiments
 
-The notebook emits candidates at threshold scales 0.90, 0.95, 1.00, and 1.05 without retraining
-(1.00 is the main candidate).
-Submit deliberate experiments only; the public limit is 20. Lower scale predicts more anomalies.
-After selecting the scale from aggregate PublicScore, set that category configuration's
-`threshold_scale` and rerun training so the exact choice is stored in the experiment bundle.
+The earlier `image_anomaly_detection_template.ipynb` can emit several threshold scales for an
+initial search. The current DINO three-mode notebook does not sweep: it freezes
+`SELECTED_THRESHOLD_SCALE = 0.85` so the comparison changes only augmentation and TTA. Lower scales
+predict more anomalies, but changing the scale now would break that controlled comparison.
 
 ## Private final
 
@@ -348,11 +353,12 @@ Before private data is released, ensure the frozen bundle is in durable storage.
 ```python
 PHASE = "private"
 RUN_TRAINING = False
-EXPERIMENT_PRESET = "anomalydino_448"  # must match the selected public run
+EXPERIMENT_MODE = "085_new_aug_tta"  # must match the selected public run
 ```
 
 The notebook rebuilds the architecture without downloading weights, restores the exact frozen
 encoders, memories, thresholds, and scales from
-`PERSISTENT_DIR / EXPERIMENT_PRESET / task2_<preset>_bundle.pt`, then performs inference only. It
+`PERSISTENT_DIR / f"anomalydino_{EXPERIMENT_MODE}" / task2_<experiment>_bundle.pt`, then performs
+inference only. It
 refuses private-mode training. Validate that the final ZIP contains exactly
 `task2_private_output.csv`.

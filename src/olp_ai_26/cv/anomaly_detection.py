@@ -51,6 +51,8 @@ SYNTHETIC_ANOMALIES = (
     "cutmix",
     "dark_curve",
     "white_line",
+    "gray_curve",
+    "white_curve",
 )
 
 SYNTHETIC_ANOMALY_DEFAULTS: dict[str, dict[str, object]] = {
@@ -69,6 +71,18 @@ SYNTHETIC_ANOMALY_DEFAULTS: dict[str, dict[str, object]] = {
         "line_length_fraction_range": (0.05, 0.10),
         "line_width_fraction": 0.002,
         "line_opacity": 1.0,
+    },
+    "gray_curve": {
+        "colored_curve_length_fraction_range": (0.06, 0.14),
+        "colored_curve_width_fraction": 0.004,
+        "curve_color_range": (0.50, 0.75),
+        "curve_opacity_range": (0.10, 0.25),
+    },
+    "white_curve": {
+        "colored_curve_length_fraction_range": (0.06, 0.14),
+        "colored_curve_width_fraction": 0.0035,
+        "curve_color_range": (0.85, 1.00),
+        "curve_opacity_range": (0.08, 0.22),
     },
 }
 
@@ -658,12 +672,16 @@ def fit_positive_evidence_head(
     *,
     seed: int = 42,
     normal_margin_quantile: float = 0.95,
+    synthetic_weights: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor | float]:
     """Fit a standardized logistic head and store a normal-evidence activation margin.
 
     The head learns positive signals from synthetic defects. At inference,
     :func:`positive_evidence_scores` subtracts a training-normal logit margin and clamps at zero,
     ensuring a low synthetic-defect logit never becomes negative evidence for anomaly detection.
+    When ``synthetic_weights`` is supplied, its values define the relative contribution of the
+    synthetic rows while the normal and synthetic classes each retain half of the total fit weight.
+    Pass ``None`` to preserve the original balanced, unweighted fit exactly.
     """
     normal = normal_features.detach().float().cpu().numpy()
     synthetic = synthetic_features.detach().float().cpu().numpy()
@@ -675,15 +693,33 @@ def fit_positive_evidence_head(
         raise ValueError("normal_margin_quantile must be between zero and one")
     features = np.concatenate((normal, synthetic), axis=0)
     labels = np.concatenate((np.zeros(len(normal), dtype=int), np.ones(len(synthetic), dtype=int)))
-    center = features.mean(axis=0)
-    scale = np.maximum(features.std(axis=0), 1e-6)
+    fit_weights = None
+    classifier_class_weight: str | None = "balanced"
+    if synthetic_weights is None:
+        center = features.mean(axis=0)
+        scale = np.maximum(features.std(axis=0), 1e-6)
+    else:
+        weights = synthetic_weights.detach().float().cpu().numpy()
+        if weights.ndim != 1 or len(weights) != len(synthetic):
+            raise ValueError("synthetic_weights must contain one value per synthetic feature")
+        if not np.isfinite(weights).all() or (weights < 0).any() or weights.sum() <= 0:
+            raise ValueError("synthetic_weights must be finite, non-negative, and sum above zero")
+        synthetic_fit_weights = 0.5 * weights / weights.sum()
+        normal_fit_weights = np.full(len(normal), 0.5 / len(normal), dtype=np.float64)
+        fit_weights = np.concatenate((normal_fit_weights, synthetic_fit_weights))
+        center = np.average(features, axis=0, weights=fit_weights)
+        variance = np.average((features - center) ** 2, axis=0, weights=fit_weights)
+        scale = np.maximum(np.sqrt(variance), 1e-6)
+        # Preserve the usual effective regularization scale used by scikit-learn.
+        fit_weights = fit_weights * len(fit_weights)
+        classifier_class_weight = None
     standardized = (features - center) / scale
     classifier = LogisticRegression(
-        class_weight="balanced",
+        class_weight=classifier_class_weight,
         max_iter=1000,
         random_state=seed,
         solver="liblinear",
-    ).fit(standardized, labels)
+    ).fit(standardized, labels, sample_weight=fit_weights)
     normal_logits = ((normal - center) / scale) @ classifier.coef_[0] + classifier.intercept_[0]
     return {
         "center": torch.tensor(center, dtype=torch.float32),
@@ -869,6 +905,86 @@ def _rasterize_path_mask(
         )
 
 
+def _colored_curve_batch(
+    images: torch.Tensor,
+    *,
+    seed: int,
+    length_fraction_range: tuple[float, float],
+    width_fraction: float,
+    color_range: tuple[float, float],
+    opacity_range: tuple[float, float],
+) -> torch.Tensor:
+    """Blend thin gray-scale quadratic curves into foreground regions."""
+    _validate_fraction_range(length_fraction_range, "colored_curve_length_fraction_range")
+    if not 0 < width_fraction < 1:
+        raise ValueError("colored_curve_width_fraction must be between zero and one")
+    if not 0 <= color_range[0] <= color_range[1] <= 1:
+        raise ValueError("curve_color_range must satisfy 0 <= low <= high <= 1")
+    if not 0 < opacity_range[0] <= opacity_range[1] <= 1:
+        raise ValueError("curve_opacity_range must satisfy 0 < low <= high <= 1")
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    batch, _, height, width = images.shape
+    masks = torch.zeros((batch, 1, height, width), dtype=torch.float32)
+    colors = torch.empty((batch, 1, 1, 1), dtype=torch.float32)
+    opacities = torch.empty((batch, 1, 1, 1), dtype=torch.float32)
+    for index in range(batch):
+        length_fraction = float(
+            torch.empty(1).uniform_(*length_fraction_range, generator=generator)
+        )
+        length = length_fraction * min(height, width)
+        safe_margin = max(3, math.ceil(length * 0.65))
+        center_x, center_y = _sample_foreground_center(
+            images[index],
+            margin_x=safe_margin,
+            margin_y=safe_margin,
+            generator=generator,
+        )
+        angle = float(torch.empty(1).uniform_(0, 2 * math.pi, generator=generator))
+        direction_x, direction_y = math.cos(angle), math.sin(angle)
+        perpendicular_x, perpendicular_y = -direction_y, direction_x
+        half = length / 2
+        bend = float(torch.empty(1).uniform_(-0.30, 0.30, generator=generator)) * length
+        x_points = torch.tensor(
+            [
+                center_x - direction_x * half,
+                center_x + perpendicular_x * bend,
+                center_x + direction_x * half,
+            ]
+        )
+        y_points = torch.tensor(
+            [
+                center_y - direction_y * half,
+                center_y + perpendicular_y * bend,
+                center_y + direction_y * half,
+            ]
+        )
+        time = torch.linspace(0, 1, max(32, round(length * 2)))
+        one_minus = 1 - time
+        curve_x = (
+            one_minus.square() * x_points[0]
+            + 2 * one_minus * time * x_points[1]
+            + time.square() * x_points[2]
+        )
+        curve_y = (
+            one_minus.square() * y_points[0]
+            + 2 * one_minus * time * y_points[1]
+            + time.square() * y_points[2]
+        )
+        _rasterize_path_mask(
+            curve_x,
+            curve_y,
+            batch_index=index,
+            masks=masks,
+            width_fraction=width_fraction,
+        )
+        colors[index] = torch.empty(1).uniform_(*color_range, generator=generator)
+        opacities[index] = torch.empty(1).uniform_(*opacity_range, generator=generator)
+    masks = masks.to(device=images.device, dtype=images.dtype)
+    colors = colors.to(device=images.device, dtype=images.dtype)
+    opacities = opacities.to(device=images.device, dtype=images.dtype)
+    return (images * (1 - opacities * masks) + colors * opacities * masks).clamp(0, 1)
+
+
 def apply_synthetic_anomaly(
     images: torch.Tensor,
     name: str,
@@ -884,13 +1000,18 @@ def apply_synthetic_anomaly(
     line_length_fraction_range: tuple[float, float] = (0.05, 0.10),
     line_width_fraction: float = 0.002,
     line_opacity: float = 1.0,
+    colored_curve_length_fraction_range: tuple[float, float] = (0.06, 0.14),
+    colored_curve_width_fraction: float = 0.004,
+    curve_color_range: tuple[float, float] | None = None,
+    curve_opacity_range: tuple[float, float] | None = None,
 ) -> torch.Tensor:
     """Create one deterministic synthetic anomaly from official normal images.
 
     ``mixup`` blends whole same-category images, while ``cutmix`` blends a small partner patch at
-    low opacity. ``dark_curve`` and ``white_line`` place short marks inside the estimated
-    foreground rather than drawing from an image edge. These outputs are synthetic positives;
-    never insert them into the normal memory bank.
+    low opacity. Curve and line methods place short marks inside the estimated foreground rather
+    than drawing from an image edge. ``gray_curve`` and ``white_curve`` use subtle target colors
+    and opacity ranges observed during private-set inspection. These outputs are synthetic
+    positives; never insert them into the normal memory bank.
 
     Args:
         images: Float image batch shaped ``[B,C,H,W]`` with values in the 0-1 range.
@@ -906,6 +1027,10 @@ def apply_synthetic_anomaly(
         line_length_fraction_range: White-line length relative to the shorter image side.
         line_width_fraction: Approximate full white-line width relative to the shorter image side.
         line_opacity: White-line opacity, where 1 produces pure white pixels.
+        colored_curve_length_fraction_range: Colored-curve length relative to the shorter side.
+        colored_curve_width_fraction: Approximate full colored-curve width relative to that side.
+        curve_color_range: Optional gray-scale target intensity range for colored curves.
+        curve_opacity_range: Optional colored-curve blending-opacity range.
 
     Returns:
         A transformed batch with the same shape, device, and dtype as ``images``.
@@ -1029,6 +1154,17 @@ def apply_synthetic_anomaly(
             )
         masks = masks.to(device=images.device, dtype=images.dtype)
         return images * (1 - curve_darkness * masks)
+    if normalized in {"gray_curve", "white_curve"}:
+        default_color = (0.50, 0.75) if normalized == "gray_curve" else (0.85, 1.00)
+        default_opacity = (0.10, 0.25) if normalized == "gray_curve" else (0.08, 0.22)
+        return _colored_curve_batch(
+            images,
+            seed=seed,
+            length_fraction_range=colored_curve_length_fraction_range,
+            width_fraction=colored_curve_width_fraction,
+            color_range=curve_color_range or default_color,
+            opacity_range=curve_opacity_range or default_opacity,
+        )
     if normalized == "white_line":
         _validate_fraction_range(line_length_fraction_range, "line_length_fraction_range")
         if not 0 < line_width_fraction < 1:
