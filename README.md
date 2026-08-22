@@ -74,7 +74,8 @@ access, but Google does not guarantee a particular GPU type or fixed resource li
 Use [the baseline catalog](docs/BASELINE_CATALOG.md) to select a notebook by required output,
 [the model catalog](docs/MODEL_CATALOG.md) to discover supported identifiers, and the
 [customization cookbook](docs/CUSTOMIZATION_GUIDE.md) for copy-ready syntax. The
-[Colab runbook](docs/COLAB_RUNBOOK.md) covers staging and recovery.
+[Colab runbook](docs/COLAB_RUNBOOK.md) covers staging and recovery. For the released normal-only
+vision task, follow the dedicated [Task 2 anomaly-detection runbook](docs/TASK2_ANOMALY_DETECTION.md).
 
 ### Shared core
 
@@ -92,6 +93,7 @@ Use [the baseline catalog](docs/BASELINE_CATALOG.md) to select a notebook by req
 
 ### CV
 
+- Normal-only image anomaly detection with per-category patch memory and frozen calibration.
 - Any timm image classifier, a curated Colab preset catalog, reusable transforms, and named TTA.
 - Frame-sampled video/activity classification with a 2D backbone and temporal pooling.
 - Nine SMP semantic-segmentation architectures, encoder discovery, Dice+BCE, RLE, and mask TTA.
@@ -110,10 +112,10 @@ Use [the baseline catalog](docs/BASELINE_CATALOG.md) to select a notebook by req
 
 ## Notebook templates
 
-There are 13 generated Colab notebooks. The canonical `*_template.py` sources cover:
+There are 14 generated Colab notebooks. The canonical `*_template.py` sources cover:
 
-- Image/video classification, semantic segmentation, classification plus a mask head, object
-  detection, instance segmentation, and adversarial robustness.
+- Normal-only image anomaly detection, image/video classification, semantic segmentation,
+  classification plus a mask head, object detection, instance segmentation, and robustness.
 - TF-IDF and transformer text classification, token classification/NER, retrieval/ranking, and
   seq2seq generation.
 - Image captioning.

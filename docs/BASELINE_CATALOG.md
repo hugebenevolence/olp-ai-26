@@ -5,6 +5,7 @@ valid baseline first, reproduce the official metric, and create a valid submissi
 
 | Problem/output | Start with | Main code | Typical official metric |
 |---|---|---|---|
+| Normal-only image anomaly label | `image_anomaly_detection_template.ipynb` | `cv.anomaly_detection` | macro category balanced accuracy |
 | Single-label image class | `cv_classification_template.ipynb` | `cv.classification`, `cv.tta` | accuracy, macro F1 |
 | Multi-label image tags | CV classification; set BCE loss and sigmoid thresholds | `classification_loss(multilabel=True)` | micro/macro F1, mAP |
 | Video/activity class | `video_classification_template.ipynb` | `cv.video_classification` | accuracy, macro F1 |

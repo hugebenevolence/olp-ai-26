@@ -24,6 +24,7 @@ def test_generated_colab_notebooks_are_valid_and_compilable():
         "classification_segmentation_template.ipynb",
         "cv_classification_template.ipynb",
         "image_captioning_template.ipynb",
+        "image_anomaly_detection_template.ipynb",
         "instance_segmentation_template.ipynb",
         "nlp_classification_template.ipynb",
         "object_detection_template.ipynb",

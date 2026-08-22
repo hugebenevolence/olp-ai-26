@@ -5,6 +5,16 @@ import torch
 from PIL import Image
 
 from olp_ai_26.cv.adversarial import fgsm, perturbation_statistics
+from olp_ai_26.cv.anomaly_detection import (
+    AnomalyImageDataset,
+    TimmPatchFeatureExtractor,
+    calibrate_anomaly_threshold,
+    cutpaste_batch,
+    discover_normal_images,
+    patch_memory_scores,
+    sample_memory_bank,
+    validate_anomaly_submission,
+)
 from olp_ai_26.cv.classification import (
     ImageTableDataset,
     build_image_classifier,
@@ -105,3 +115,42 @@ def test_classification_segmentation_model_and_loss():
     )
     assert loss.isfinite()
     assert set(parts) == {"classification_loss", "segmentation_loss"}
+
+
+def test_anomaly_feature_memory_and_calibration(tmp_path):
+    category = tmp_path / "category_01"
+    category.mkdir()
+    Image.new("RGB", (24, 20), color=(10, 20, 30)).save(category / "normal.png")
+    frame = discover_normal_images(tmp_path)
+    assert frame.to_dict("records") == [
+        {"category": "category_01", "relative_path": "category_01/normal.png"}
+    ]
+    image = AnomalyImageDataset(frame, root=tmp_path, image_size=32)[0]
+    assert image.shape == (3, 32, 32)
+    extractor = TimmPatchFeatureExtractor(
+        "resnet18", out_indices=(1, 2), projection_dim=8, pretrained_allowed=False
+    ).eval()
+    with torch.inference_mode():
+        embeddings = extractor(image.unsqueeze(0))
+    bank = sample_memory_bank([embeddings], max_patches=10, seed=42)
+    scores = patch_memory_scores(embeddings, bank, top_k=2)
+    assert scores.shape == (1,)
+    assert scores.item() >= 0
+    attacked = cutpaste_batch(image.unsqueeze(0), seed=42)
+    assert attacked.shape == image.unsqueeze(0).shape
+    calibrated = calibrate_anomaly_threshold([0.1, 0.2, 0.3], [0.7, 0.8, 0.9])
+    assert 0.3 < calibrated["threshold"] < 0.7
+    assert calibrated["proxy_balanced_accuracy"] == 1.0
+
+
+def test_anomaly_submission_contract():
+    test = pd.DataFrame(
+        {
+            "sample_id": ["a", "b"],
+            "category": ["category_01", "category_02"],
+            "relative_path": ["images/a.png", "images/b.png"],
+        }
+    )
+    submission = test[["sample_id", "category"]].copy()
+    submission["label"] = [0, 1]
+    validate_anomaly_submission(submission, test)

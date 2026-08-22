@@ -2,6 +2,14 @@
 
 The examples in notebooks are starting points, **not the complete supported set**.
 
+## Normal-only image anomaly detection
+
+The task-specific notebook defaults to `wide_resnet50_2`, the conventional stronger PatchCore
+feature backbone. Use `resnet18` for pipeline debugging or `resnet50` for a middle ground. The
+extractor accepts timm feature backbones; confirm support with
+`list_supported_classifiers("*resnet*")`. Model weights are frozen, while category-specific patch
+memory banks and decision thresholds are learned from the official normal images.
+
 ## Image classification
 
 `build_image_classifier()` accepts any identifier returned by the installed timm version:
