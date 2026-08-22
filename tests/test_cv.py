@@ -15,11 +15,15 @@ from olp_ai_26.cv.anomaly_detection import (
     calibrate_anomaly_threshold,
     cutpaste_batch,
     discover_normal_images,
+    fit_positive_evidence_head,
     load_official_training_table,
+    patch_memory_features,
     patch_memory_scores,
+    positive_evidence_scores,
     sample_memory_bank,
     select_anomaly_threshold,
     stage_official_task2_data,
+    synthetic_anomaly_defaults,
     validate_anomaly_submission,
 )
 from olp_ai_26.cv.classification import (
@@ -140,8 +144,11 @@ def test_anomaly_feature_memory_and_calibration(tmp_path):
     with torch.inference_mode():
         embeddings = extractor(image.unsqueeze(0))
     bank = sample_memory_bank([embeddings], max_patches=10, seed=42)
+    feature_statistics = patch_memory_features(embeddings, bank, top_k=2)
+    assert feature_statistics.shape == (1, 6)
     scores = patch_memory_scores(embeddings, bank, top_k=2)
     assert scores.shape == (1,)
+    assert torch.equal(scores, feature_statistics[:, -1])
     assert scores.item() >= 0
     attacked = cutpaste_batch(image.unsqueeze(0), seed=42)
     assert attacked.shape == image.unsqueeze(0).shape
@@ -152,7 +159,9 @@ def test_anomaly_feature_memory_and_calibration(tmp_path):
     augmented = apply_normal_augmentation(image.unsqueeze(0), "contrast_up")
     assert augmented.shape == image.unsqueeze(0).shape
     assert augmented.min() >= 0 and augmented.max() <= 1
-    for synthetic_name in ("cutpaste", "mixup", "blur", "dark_curve"):
+    normal_blur = apply_normal_augmentation(image.unsqueeze(0), "blur_mild")
+    assert normal_blur.shape == image.unsqueeze(0).shape
+    for synthetic_name in ("cutpaste", "mixup", "cutmix", "dark_curve", "white_line"):
         synthetic = apply_synthetic_anomaly(
             image.unsqueeze(0).repeat(2, 1, 1, 1), synthetic_name, seed=42
         )
@@ -179,6 +188,33 @@ def test_anomaly_feature_memory_and_calibration(tmp_path):
     light_curve = apply_synthetic_anomaly(curve_source, "dark_curve", seed=42, curve_darkness=0.20)
     dark_curve = apply_synthetic_anomaly(curve_source, "dark_curve", seed=42, curve_darkness=0.90)
     assert dark_curve.mean() < light_curve.mean()
+    defaults = synthetic_anomaly_defaults()
+    assert "blur" not in defaults
+    assert defaults["cutmix"]["cutmix_opacity_range"] == (0.06, 0.14)
+    marked_source = torch.full((2, 3, 64, 64), 0.4)
+    internal_curve = apply_synthetic_anomaly(marked_source, "dark_curve", seed=42)
+    internal_line = apply_synthetic_anomaly(marked_source, "white_line", seed=42)
+    for marked in (internal_curve, internal_line):
+        assert torch.equal(marked[:, :, 0, :], marked_source[:, :, 0, :])
+        assert torch.equal(marked[:, :, -1, :], marked_source[:, :, -1, :])
+        assert torch.equal(marked[:, :, :, 0], marked_source[:, :, :, 0])
+        assert torch.equal(marked[:, :, :, -1], marked_source[:, :, :, -1])
+    normal_head_features = torch.tensor(
+        [[0.0, 0.1, 0.0, 0.1, 0.0, 0.1], [0.1, 0.0, 0.1, 0.0, 0.1, 0.0]]
+    )
+    synthetic_head_features = torch.tensor(
+        [[1.0, 0.9, 1.0, 0.9, 1.0, 0.9], [0.9, 1.0, 0.9, 1.0, 0.9, 1.0]]
+    )
+    evidence_head = fit_positive_evidence_head(
+        normal_head_features,
+        synthetic_head_features,
+        seed=42,
+    )
+    evidence = positive_evidence_scores(
+        torch.cat((normal_head_features, synthetic_head_features)), evidence_head
+    )
+    assert torch.all(evidence >= 0)
+    assert evidence[2:].mean() > evidence[:2].mean()
 
 
 def test_anomaly_submission_contract():

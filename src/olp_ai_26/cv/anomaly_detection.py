@@ -6,6 +6,7 @@ feature memory bank and one decision threshold per category. Higher scores mean 
 
 from __future__ import annotations
 
+import math
 import shutil
 import zipfile
 from collections.abc import Iterable
@@ -17,6 +18,7 @@ import pandas as pd
 import timm
 import torch
 from PIL import Image
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import balanced_accuracy_score
 from torch import nn
 from torch.nn import functional as F
@@ -40,14 +42,35 @@ NORMAL_AUGMENTATIONS = (
     "saturation_up",
     "cool",
     "warm",
+    "blur_mild",
 )
 
 SYNTHETIC_ANOMALIES = (
     "cutpaste",
     "mixup",
-    "blur",
+    "cutmix",
     "dark_curve",
+    "white_line",
 )
+
+SYNTHETIC_ANOMALY_DEFAULTS: dict[str, dict[str, object]] = {
+    "cutpaste": {"cutpaste_area_range": (0.03, 0.15)},
+    "mixup": {"mixup_alpha_range": (0.25, 0.45)},
+    "cutmix": {
+        "cutmix_area_range": (0.025, 0.10),
+        "cutmix_opacity_range": (0.06, 0.14),
+    },
+    "dark_curve": {
+        "curve_length_fraction_range": (0.08, 0.16),
+        "curve_width_fraction": 0.012,
+        "curve_darkness": 0.75,
+    },
+    "white_line": {
+        "line_length_fraction_range": (0.05, 0.10),
+        "line_width_fraction": 0.002,
+        "line_opacity": 1.0,
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -358,6 +381,27 @@ def patch_memory_scores(
     Chunking bounds the temporary distance matrix. Both tensors must contain the same embedding
     dimension; the memory bank is moved to the embedding device for the calculation.
     """
+    return patch_memory_features(
+        embeddings,
+        memory_bank,
+        top_k=top_k,
+        distance_chunk_size=distance_chunk_size,
+    )[:, -1]
+
+
+def patch_memory_features(
+    embeddings: torch.Tensor,
+    memory_bank: torch.Tensor,
+    *,
+    top_k: int = 3,
+    distance_chunk_size: int = 2048,
+) -> torch.Tensor:
+    """Summarize each image's nearest-memory patch-distance distribution.
+
+    The six returned columns are mean, standard deviation, maximum, 90th percentile, 99th
+    percentile, and top-k mean. The final column exactly matches :func:`patch_memory_scores` and
+    the full vector is suitable for a small synthetic-positive evidence head.
+    """
     if embeddings.ndim != 3 or memory_bank.ndim != 2:
         raise ValueError("Expected embeddings [B,P,D] and memory_bank [M,D]")
     if embeddings.shape[-1] != memory_bank.shape[-1]:
@@ -371,7 +415,71 @@ def patch_memory_scores(
         nearest.append(distances.min(dim=1).values)
     patch_scores = torch.cat(nearest).reshape(batch, patches)
     count = min(max(1, top_k), patches)
-    return patch_scores.topk(count, dim=1).values.mean(dim=1)
+    quantiles = torch.quantile(patch_scores, torch.tensor((0.90, 0.99), device=flat.device), dim=1)
+    return torch.stack(
+        (
+            patch_scores.mean(dim=1),
+            patch_scores.std(dim=1, unbiased=False),
+            patch_scores.max(dim=1).values,
+            quantiles[0],
+            quantiles[1],
+            patch_scores.topk(count, dim=1).values.mean(dim=1),
+        ),
+        dim=1,
+    )
+
+
+def fit_positive_evidence_head(
+    normal_features: torch.Tensor,
+    synthetic_features: torch.Tensor,
+    *,
+    seed: int = 42,
+    normal_margin_quantile: float = 0.95,
+) -> dict[str, torch.Tensor | float]:
+    """Fit a standardized logistic head and store a normal-evidence activation margin.
+
+    The head learns positive signals from synthetic defects. At inference,
+    :func:`positive_evidence_scores` subtracts a training-normal logit margin and clamps at zero,
+    ensuring a low synthetic-defect logit never becomes negative evidence for anomaly detection.
+    """
+    normal = normal_features.detach().float().cpu().numpy()
+    synthetic = synthetic_features.detach().float().cpu().numpy()
+    if normal.ndim != 2 or synthetic.ndim != 2 or normal.shape[1] != synthetic.shape[1]:
+        raise ValueError("normal_features and synthetic_features must be 2D with equal width")
+    if not len(normal) or not len(synthetic):
+        raise ValueError("Both normal and synthetic feature sets must be non-empty")
+    if not 0 < normal_margin_quantile < 1:
+        raise ValueError("normal_margin_quantile must be between zero and one")
+    features = np.concatenate((normal, synthetic), axis=0)
+    labels = np.concatenate((np.zeros(len(normal), dtype=int), np.ones(len(synthetic), dtype=int)))
+    center = features.mean(axis=0)
+    scale = np.maximum(features.std(axis=0), 1e-6)
+    standardized = (features - center) / scale
+    classifier = LogisticRegression(
+        class_weight="balanced",
+        max_iter=1000,
+        random_state=seed,
+        solver="liblinear",
+    ).fit(standardized, labels)
+    normal_logits = ((normal - center) / scale) @ classifier.coef_[0] + classifier.intercept_[0]
+    return {
+        "center": torch.tensor(center, dtype=torch.float32),
+        "scale": torch.tensor(scale, dtype=torch.float32),
+        "coefficient": torch.tensor(classifier.coef_[0], dtype=torch.float32),
+        "intercept": float(classifier.intercept_[0]),
+        "normal_margin": float(np.quantile(normal_logits, normal_margin_quantile)),
+    }
+
+
+def positive_evidence_scores(
+    features: torch.Tensor,
+    head: dict[str, torch.Tensor | float],
+) -> torch.Tensor:
+    """Return non-negative learned evidence for known synthetic anomaly signals."""
+    values = features.detach().float().cpu()
+    standardized = (values - head["center"]) / head["scale"]
+    logits = standardized @ head["coefficient"] + float(head["intercept"])
+    return torch.relu(logits - float(head["normal_margin"]))
 
 
 def cutpaste_batch(
@@ -408,6 +516,87 @@ def cutpaste_batch(
     return output
 
 
+def synthetic_anomaly_defaults() -> dict[str, dict[str, object]]:
+    """Return a mutable copy of the recommended synthetic-anomaly parameters."""
+    return {method: dict(parameters) for method, parameters in SYNTHETIC_ANOMALY_DEFAULTS.items()}
+
+
+def _random_partner_images(
+    images: torch.Tensor,
+    generator: torch.Generator,
+) -> torch.Tensor:
+    """Pair each image with a different randomly ordered image from the same batch."""
+    if len(images) == 1:
+        return torch.flip(images, (-1,))
+    order = torch.randperm(len(images), generator=generator)
+    partner_indices = torch.empty_like(order)
+    partner_indices[order] = torch.roll(order, shifts=1)
+    return images[partner_indices.to(images.device)]
+
+
+def _sample_foreground_center(
+    image: torch.Tensor,
+    *,
+    margin_x: int,
+    margin_y: int,
+    generator: torch.Generator,
+) -> tuple[int, int]:
+    """Sample an internal point that differs from the estimated border background."""
+    _, height, width = image.shape
+    cpu_image = image.detach().float().cpu()
+    border = torch.cat(
+        (
+            cpu_image[:, 0, :],
+            cpu_image[:, -1, :],
+            cpu_image[:, :, 0],
+            cpu_image[:, :, -1],
+        ),
+        dim=1,
+    )
+    background = border.median(dim=1).values.view(3, 1, 1)
+    distance = (cpu_image - background).abs().mean(dim=0)
+    valid = torch.zeros((height, width), dtype=torch.bool)
+    valid[margin_y : height - margin_y, margin_x : width - margin_x] = True
+    valid_distances = distance[valid]
+    adaptive_threshold = max(0.06, float(torch.quantile(valid_distances, 0.80)))
+    candidates = torch.nonzero(valid & (distance >= adaptive_threshold), as_tuple=False)
+    if len(candidates):
+        selected = candidates[int(torch.randint(len(candidates), (1,), generator=generator))]
+        return int(selected[1]), int(selected[0])
+    center_x = int(torch.randint(margin_x, width - margin_x, (1,), generator=generator))
+    center_y = int(torch.randint(margin_y, height - margin_y, (1,), generator=generator))
+    return center_x, center_y
+
+
+def _validate_fraction_range(values: tuple[float, float], name: str) -> None:
+    """Validate an increasing fractional interval inside zero and one."""
+    if not 0 < values[0] <= values[1] < 1:
+        raise ValueError(f"{name} must satisfy 0 < low <= high < 1")
+
+
+def _rasterize_path_mask(
+    points_x: torch.Tensor,
+    points_y: torch.Tensor,
+    *,
+    batch_index: int,
+    masks: torch.Tensor,
+    width_fraction: float,
+) -> None:
+    """Rasterize and thicken one internal path into a batch mask in place."""
+    height, width = masks.shape[-2:]
+    x = points_x.round().long().clamp(0, width - 1)
+    y = points_y.round().long().clamp(0, height - 1)
+    masks[batch_index, 0, y, x] = 1
+    radius = max(0, round(min(height, width) * width_fraction / 2))
+    if radius:
+        masks[batch_index : batch_index + 1] = F.max_pool2d(
+            masks[batch_index : batch_index + 1],
+            kernel_size=2 * radius + 1,
+            stride=1,
+            padding=radius,
+        )
+
+
 def apply_synthetic_anomaly(
     images: torch.Tensor,
     name: str,
@@ -415,15 +604,21 @@ def apply_synthetic_anomaly(
     seed: int = 42,
     cutpaste_area_range: tuple[float, float] = (0.03, 0.15),
     mixup_alpha_range: tuple[float, float] = (0.25, 0.45),
-    blur_sigma: float = 2.5,
-    curve_width_fraction: float = 0.025,
-    curve_darkness: float = 0.85,
+    cutmix_area_range: tuple[float, float] = (0.025, 0.10),
+    cutmix_opacity_range: tuple[float, float] = (0.06, 0.14),
+    curve_length_fraction_range: tuple[float, float] = (0.08, 0.16),
+    curve_width_fraction: float = 0.012,
+    curve_darkness: float = 0.75,
+    line_length_fraction_range: tuple[float, float] = (0.05, 0.10),
+    line_width_fraction: float = 0.002,
+    line_opacity: float = 1.0,
 ) -> torch.Tensor:
     """Create one deterministic synthetic anomaly from official normal images.
 
-    ``mixup`` blends each image with another image from the same category, ``blur`` removes fine
-    detail, and ``dark_curve`` overlays a thick quadratic curve. These outputs are synthetic
-    positives for calibration only; they must never be inserted into the normal memory bank.
+    ``mixup`` blends whole same-category images, while ``cutmix`` blends a small partner patch at
+    low opacity. ``dark_curve`` and ``white_line`` place short marks inside the estimated
+    foreground rather than drawing from an image edge. These outputs are synthetic positives;
+    never insert them into the normal memory bank.
 
     Args:
         images: Float image batch shaped ``[B,C,H,W]`` with values in the 0-1 range.
@@ -431,9 +626,14 @@ def apply_synthetic_anomaly(
         seed: Reproducibility seed for CutPaste, MixUp pairing, and curve geometry.
         cutpaste_area_range: Minimum and maximum pasted fraction of image area.
         mixup_alpha_range: Minimum and maximum contribution from the random partner image.
-        blur_sigma: Gaussian blur standard deviation in pixels.
+        cutmix_area_range: Minimum and maximum area of the blended partner patch.
+        cutmix_opacity_range: Minimum and maximum opacity of the blended partner patch.
+        curve_length_fraction_range: Curve length relative to the shorter image side.
         curve_width_fraction: Approximate full curve width divided by the shorter image side.
         curve_darkness: Curve opacity, where 0 changes nothing and 1 produces black pixels.
+        line_length_fraction_range: White-line length relative to the shorter image side.
+        line_width_fraction: Approximate full white-line width relative to the shorter image side.
+        line_opacity: White-line opacity, where 1 produces pure white pixels.
 
     Returns:
         A transformed batch with the same shape, device, and dtype as ``images``.
@@ -444,34 +644,59 @@ def apply_synthetic_anomaly(
     if normalized == "cutpaste":
         return cutpaste_batch(images, area_range=cutpaste_area_range, seed=seed)
     if normalized == "mixup":
-        if not 0 < mixup_alpha_range[0] <= mixup_alpha_range[1] < 1:
-            raise ValueError("mixup_alpha_range must satisfy 0 < low <= high < 1")
+        _validate_fraction_range(mixup_alpha_range, "mixup_alpha_range")
         generator = torch.Generator(device="cpu").manual_seed(seed)
-        if len(images) == 1:
-            partners = torch.flip(images, (-1,))
-        else:
-            # Assign every image a random different partner using one randomized cycle.
-            order = torch.randperm(len(images), generator=generator)
-            partner_indices = torch.empty_like(order)
-            partner_indices[order] = torch.roll(order, shifts=1)
-            partners = images[partner_indices.to(images.device)]
+        partners = _random_partner_images(images, generator)
         alpha = torch.empty((len(images), 1, 1, 1)).uniform_(
             *mixup_alpha_range,
             generator=generator,
         )
         alpha = alpha.to(device=images.device, dtype=images.dtype)
         return ((1 - alpha) * images + alpha * partners).clamp(0, 1)
-    if normalized == "blur":
-        if blur_sigma <= 0:
-            raise ValueError("blur_sigma must be positive")
-        radius = max(1, min(12, round(2 * blur_sigma)))
-        kernel_size = 2 * radius + 1
-        return v2.functional.gaussian_blur(
-            images,
-            kernel_size=[kernel_size, kernel_size],
-            sigma=[blur_sigma, blur_sigma],
-        )
+    if normalized == "cutmix":
+        _validate_fraction_range(cutmix_area_range, "cutmix_area_range")
+        _validate_fraction_range(cutmix_opacity_range, "cutmix_opacity_range")
+        generator = torch.Generator(device="cpu").manual_seed(seed)
+        partners = _random_partner_images(images, generator)
+        output = images.clone()
+        _, _, height, width = images.shape
+        for index in range(len(images)):
+            area = float(torch.empty(1).uniform_(*cutmix_area_range, generator=generator))
+            ratio = float(torch.empty(1).uniform_(0.65, 1.55, generator=generator))
+            patch_height = max(2, round((area * height * width / ratio) ** 0.5))
+            patch_width = max(2, round(patch_height * ratio))
+            patch_height = min(patch_height, height // 2)
+            patch_width = min(patch_width, width // 2)
+            half_x = patch_width // 2 + 1
+            half_y = patch_height // 2 + 1
+            source_x, source_y = _sample_foreground_center(
+                partners[index],
+                margin_x=half_x,
+                margin_y=half_y,
+                generator=generator,
+            )
+            target_x, target_y = _sample_foreground_center(
+                images[index],
+                margin_x=half_x,
+                margin_y=half_y,
+                generator=generator,
+            )
+            source = partners[
+                index,
+                :,
+                source_y - patch_height // 2 : source_y - patch_height // 2 + patch_height,
+                source_x - patch_width // 2 : source_x - patch_width // 2 + patch_width,
+            ]
+            y0 = target_y - patch_height // 2
+            x0 = target_x - patch_width // 2
+            opacity = float(torch.empty(1).uniform_(*cutmix_opacity_range, generator=generator))
+            destination = output[index, :, y0 : y0 + patch_height, x0 : x0 + patch_width]
+            output[index, :, y0 : y0 + patch_height, x0 : x0 + patch_width] = (
+                1 - opacity
+            ) * destination + opacity * source
+        return output.clamp(0, 1)
     if normalized == "dark_curve":
+        _validate_fraction_range(curve_length_fraction_range, "curve_length_fraction_range")
         if not 0 < curve_width_fraction < 1:
             raise ValueError("curve_width_fraction must be between zero and one")
         if not 0 < curve_darkness <= 1:
@@ -479,20 +704,39 @@ def apply_synthetic_anomaly(
         generator = torch.Generator(device="cpu").manual_seed(seed)
         batch, _, height, width = images.shape
         masks = torch.zeros((batch, 1, height, width), dtype=torch.float32)
-        steps = max(height, width) * 2
-        time = torch.linspace(0, 1, steps)
         for index in range(batch):
-            horizontal = bool(torch.randint(2, (1,), generator=generator).item())
-            if horizontal:
-                x_points = torch.tensor(
-                    [0.0, float(width // 2), float(width - 1)], dtype=torch.float32
-                )
-                y_points = torch.randint(height, (3,), generator=generator).float()
-            else:
-                x_points = torch.randint(width, (3,), generator=generator).float()
-                y_points = torch.tensor(
-                    [0.0, float(height // 2), float(height - 1)], dtype=torch.float32
-                )
+            length_fraction = float(
+                torch.empty(1).uniform_(*curve_length_fraction_range, generator=generator)
+            )
+            length = length_fraction * min(height, width)
+            safe_margin = max(3, math.ceil(length * 0.65))
+            center_x, center_y = _sample_foreground_center(
+                images[index],
+                margin_x=safe_margin,
+                margin_y=safe_margin,
+                generator=generator,
+            )
+            angle = float(torch.empty(1).uniform_(0, 2 * math.pi, generator=generator))
+            direction_x, direction_y = math.cos(angle), math.sin(angle)
+            perpendicular_x, perpendicular_y = -direction_y, direction_x
+            half = length / 2
+            bend = float(torch.empty(1).uniform_(-0.22, 0.22, generator=generator)) * length
+            x_points = torch.tensor(
+                [
+                    center_x - direction_x * half,
+                    center_x + perpendicular_x * bend,
+                    center_x + direction_x * half,
+                ]
+            )
+            y_points = torch.tensor(
+                [
+                    center_y - direction_y * half,
+                    center_y + perpendicular_y * bend,
+                    center_y + direction_y * half,
+                ]
+            )
+            steps = max(32, round(length * 2))
+            time = torch.linspace(0, 1, steps)
             one_minus = 1 - time
             curve_x = (
                 one_minus.square() * x_points[0]
@@ -504,11 +748,57 @@ def apply_synthetic_anomaly(
                 + 2 * one_minus * time * y_points[1]
                 + time.square() * y_points[2]
             )
-            masks[index, 0, curve_y.round().long(), curve_x.round().long()] = 1
-        radius = max(1, round(min(height, width) * curve_width_fraction / 2))
-        masks = F.max_pool2d(masks, kernel_size=2 * radius + 1, stride=1, padding=radius)
+            _rasterize_path_mask(
+                curve_x,
+                curve_y,
+                batch_index=index,
+                masks=masks,
+                width_fraction=curve_width_fraction,
+            )
         masks = masks.to(device=images.device, dtype=images.dtype)
         return images * (1 - curve_darkness * masks)
+    if normalized == "white_line":
+        _validate_fraction_range(line_length_fraction_range, "line_length_fraction_range")
+        if not 0 < line_width_fraction < 1:
+            raise ValueError("line_width_fraction must be between zero and one")
+        if not 0 < line_opacity <= 1:
+            raise ValueError("line_opacity must be in (0, 1]")
+        generator = torch.Generator(device="cpu").manual_seed(seed)
+        batch, _, height, width = images.shape
+        masks = torch.zeros((batch, 1, height, width), dtype=torch.float32)
+        for index in range(batch):
+            length_fraction = float(
+                torch.empty(1).uniform_(*line_length_fraction_range, generator=generator)
+            )
+            length = length_fraction * min(height, width)
+            safe_margin = max(3, math.ceil(length * 0.55))
+            center_x, center_y = _sample_foreground_center(
+                images[index],
+                margin_x=safe_margin,
+                margin_y=safe_margin,
+                generator=generator,
+            )
+            angle = float(torch.empty(1).uniform_(0, 2 * math.pi, generator=generator))
+            half = length / 2
+            points_x = torch.linspace(
+                center_x - math.cos(angle) * half,
+                center_x + math.cos(angle) * half,
+                max(16, round(length * 2)),
+            )
+            points_y = torch.linspace(
+                center_y - math.sin(angle) * half,
+                center_y + math.sin(angle) * half,
+                max(16, round(length * 2)),
+            )
+            _rasterize_path_mask(
+                points_x,
+                points_y,
+                batch_index=index,
+                masks=masks,
+                width_fraction=line_width_fraction,
+            )
+        masks = masks.to(device=images.device, dtype=images.dtype)
+        return (images * (1 - line_opacity * masks) + line_opacity * masks).clamp(0, 1)
     raise ValueError(f"Unknown synthetic anomaly {name!r}; choose {SYNTHETIC_ANOMALIES}")
 
 
@@ -552,6 +842,12 @@ def apply_normal_augmentation(images: torch.Tensor, name: str) -> torch.Tensor:
             else torch.tensor((1.02, 1.00, 0.98), device=images.device, dtype=images.dtype)
         )
         return (images * factors.view(1, 3, 1, 1)).clamp(0, 1)
+    if normalized == "blur_mild":
+        return v2.functional.gaussian_blur(
+            images,
+            kernel_size=[5, 5],
+            sigma=[0.8, 0.8],
+        )
     raise ValueError(f"Unknown normal augmentation {name!r}; choose {NORMAL_AUGMENTATIONS}")
 
 

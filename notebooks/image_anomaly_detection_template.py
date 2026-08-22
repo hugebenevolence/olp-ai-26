@@ -44,11 +44,14 @@ from olp_ai_26.cv.anomaly_detection import (
     apply_normal_augmentation,
     apply_synthetic_anomaly,
     calibrate_anomaly_threshold,
+    fit_positive_evidence_head,
     load_official_training_table,
-    patch_memory_scores,
+    patch_memory_features,
+    positive_evidence_scores,
     sample_memory_bank,
     select_anomaly_threshold,
     stage_official_task2_data,
+    synthetic_anomaly_defaults,
     validate_anomaly_submission,
 )
 
@@ -137,12 +140,7 @@ print(dataset_report(paths.data_dir, image_limit=100)["counts"])
 
 # %%
 
-DEFAULT_SYNTHETIC_PARAMETERS = {
-    "cutpaste": {"cutpaste_area_range": (0.03, 0.15)},
-    "mixup": {"mixup_alpha_range": (0.25, 0.45)},
-    "blur": {"blur_sigma": 2.5},
-    "dark_curve": {"curve_width_fraction": 0.025, "curve_darkness": 0.85},
-}
+DEFAULT_SYNTHETIC_PARAMETERS = synthetic_anomaly_defaults()
 
 
 def category_config(
@@ -158,6 +156,8 @@ def category_config(
     threshold_scale=1.0,
     synthetic_anomalies=("cutpaste",),
     synthetic_parameters=None,
+    positive_evidence_weight=0.0,
+    evidence_normal_margin_quantile=0.95,
 ):
     """Create one explicit, serializable category experiment configuration."""
     parameters = synthetic_parameters or DEFAULT_SYNTHETIC_PARAMETERS
@@ -178,6 +178,8 @@ def category_config(
         "synthetic_parameters": {
             method: dict(method_parameters) for method, method_parameters in parameters.items()
         },
+        "positive_evidence_weight": positive_evidence_weight,
+        "evidence_normal_margin_quantile": evidence_normal_margin_quantile,
     }
 
 
@@ -213,13 +215,26 @@ MODELS_ONLY_CONFIGS = {
 # Specialized preset derived from aggregate train/public acquisition statistics and category-level
 # visual structure. These are hypotheses to test, not claimed anomaly labels.
 CATEGORY_AUGMENTATIONS = {
-    "category_01": ("identity", "rot180", "contrast_down", "contrast_up"),
-    "category_02": ("identity", "brightness_down", "brightness_up", "contrast_up"),
-    "category_03": ("identity", "hflip", "vflip", "rot90", "rot270"),
-    "category_04": ("identity", "brightness_down", "brightness_up", "contrast_up"),
-    "category_05": ("identity", "hflip", "vflip", "rot90", "rot270"),
+    "category_01": ("identity", "blur_mild", "rot180", "contrast_down", "contrast_up"),
+    "category_02": (
+        "identity",
+        "blur_mild",
+        "brightness_down",
+        "brightness_up",
+        "contrast_up",
+    ),
+    "category_03": ("identity", "blur_mild", "hflip", "vflip", "rot90", "rot270"),
+    "category_04": (
+        "identity",
+        "blur_mild",
+        "brightness_down",
+        "brightness_up",
+        "contrast_up",
+    ),
+    "category_05": ("identity", "blur_mild", "hflip", "vflip", "rot90", "rot270"),
     "category_06": (
         "identity",
+        "blur_mild",
         "brightness_down",
         "brightness_up",
         "contrast_up",
@@ -228,12 +243,12 @@ CATEGORY_AUGMENTATIONS = {
     ),
 }
 SYNTHETIC_ANOMALY_POLICIES = {
-    "category_01": ("cutpaste", "mixup", "blur", "dark_curve"),
-    "category_02": ("cutpaste", "mixup", "blur", "dark_curve"),
-    "category_03": ("cutpaste", "mixup", "blur", "dark_curve"),
-    "category_04": ("cutpaste", "mixup", "blur", "dark_curve"),
-    "category_05": ("cutpaste", "mixup", "blur", "dark_curve"),
-    "category_06": ("cutpaste", "mixup", "blur", "dark_curve"),
+    "category_01": ("cutmix", "dark_curve", "white_line"),
+    "category_02": ("cutmix", "dark_curve", "white_line"),
+    "category_03": ("cutmix", "dark_curve", "white_line"),
+    "category_04": ("cutmix", "dark_curve", "white_line"),
+    "category_05": ("cutmix", "dark_curve", "white_line"),
+    "category_06": ("cutmix", "dark_curve", "white_line"),
 }
 SYNTHETIC_PARAMETERS_BY_CATEGORY = {
     category: {
@@ -242,7 +257,7 @@ SYNTHETIC_PARAMETERS_BY_CATEGORY = {
     for category in CATEGORIES
 }
 # Example per-category severity edit:
-# SYNTHETIC_PARAMETERS_BY_CATEGORY["category_06"]["mixup"]["mixup_alpha_range"] = (0.15, 0.30)
+# SYNTHETIC_PARAMETERS_BY_CATEGORY["category_06"]["cutmix"]["cutmix_opacity_range"] = (0.08, 0.15)
 NORMAL_QUANTILES = {
     "category_01": 0.99,
     "category_02": 0.975,
@@ -258,7 +273,9 @@ CATEGORY_AUGMENTED_CONFIGS = {
         "synthetic_anomalies": SYNTHETIC_ANOMALY_POLICIES[category],
         "synthetic_parameters": SYNTHETIC_PARAMETERS_BY_CATEGORY[category],
         "normal_quantile": NORMAL_QUANTILES[category],
-        "threshold_mode": "min_synthetic_quantile",
+        "threshold_mode": "normal_quantile",
+        "positive_evidence_weight": 0.5,
+        "evidence_normal_margin_quantile": 0.95,
     }
     for category in CATEGORIES
 }
@@ -522,11 +539,11 @@ def iter_normal_patch_batches(frame, root, extractor, config):
 
 @torch.inference_mode()
 def score_frame(frame, root, extractor, memory_bank, config, *, synthetic_method=None):
-    """Score table rows in order using deterministic validation/test preprocessing."""
+    """Return PatchCore scores and compact distance features for table rows in order."""
     dataset = AnomalyImageDataset(frame, root=root, image_size=config["image_size"])
     loader = DataLoader(dataset, batch_size=config["batch_size"], shuffle=False, **loader_options)
     bank = memory_bank.to(DEVICE)
-    scores = []
+    feature_batches = []
     for batch_index, images in enumerate(loader):
         if synthetic_method is not None:
             images = apply_synthetic_anomaly(
@@ -537,14 +554,34 @@ def score_frame(frame, root, extractor, memory_bank, config, *, synthetic_method
             )
         with torch.autocast(DEVICE, dtype=AMP_DTYPE, enabled=DEVICE == "cuda"):
             embeddings = extractor(images.to(DEVICE)).float()
-        values = patch_memory_scores(embeddings, bank, top_k=config["top_k"])
-        scores.extend(values.cpu().tolist())
-    return np.asarray(scores, dtype=np.float64)
+        feature_batches.append(patch_memory_features(embeddings, bank, top_k=config["top_k"]).cpu())
+    features = torch.cat(feature_batches)
+    return features[:, -1].numpy().astype(np.float64), features
+
+
+def combine_anomaly_evidence(patchcore_scores, features, artifact):
+    """Combine open-set PatchCore distance with optional one-way learned positive evidence.
+
+    Synthetic evidence is clamped at zero before addition. Therefore, not matching CutMix, a dark
+    curve, or a white line can never reduce the PatchCore score of an otherwise novel anomaly.
+    """
+    patchcore_scores = np.asarray(patchcore_scores, dtype=np.float64)
+    weight = float(artifact["config"]["positive_evidence_weight"])
+    if weight <= 0 or artifact.get("positive_evidence_head") is None:
+        zeros = np.zeros_like(patchcore_scores)
+        return patchcore_scores, zeros, patchcore_scores
+    patchcore_z = (patchcore_scores - artifact["patch_score_mean"]) / artifact["patch_score_std"]
+    evidence = positive_evidence_scores(features, artifact["positive_evidence_head"]).numpy()
+    combined = patchcore_z + weight * evidence
+    return patchcore_z, evidence, combined
 
 
 # %% [markdown]
-# ## 4. Fit category memories and calibrate thresholds
-# `proxy_balanced_accuracy` uses synthetic CutPaste positives and is not the official metric.
+# ## 4. Fit category memories, positive-evidence heads, and thresholds
+#
+# PatchCore remains the open-set detector. For `category_augmented`, known synthetic defects train a
+# tiny auxiliary head. Its output is clamped to non-negative values and only added to PatchCore, so
+# an image does not become "more normal" merely because it lacks a known synthetic pattern.
 
 # %%
 model_states = {}
@@ -566,20 +603,65 @@ if RUN_TRAINING:
             max_patches=config["max_memory_patches"],
             seed=SEED,
         )
-        normal_scores = score_frame(split.valid, TRAIN_ROOT, extractor, bank, config)
-        synthetic_scores = np.concatenate(
-            [
-                score_frame(
-                    split.valid,
-                    TRAIN_ROOT,
-                    extractor,
-                    bank,
-                    config,
-                    synthetic_method=method,
-                )
-                for method in config["synthetic_anomalies"]
-            ]
+        evidence_head = None
+        patch_score_mean = 0.0
+        patch_score_std = 1.0
+        if config["positive_evidence_weight"] > 0:
+            evidence_split = make_split(split.valid, valid_size=0.5, seed=SEED + 1)
+            evidence_normal_scores, evidence_normal_features = score_frame(
+                evidence_split.train, TRAIN_ROOT, extractor, bank, config
+            )
+            synthetic_training_features = torch.cat(
+                [
+                    score_frame(
+                        evidence_split.train,
+                        TRAIN_ROOT,
+                        extractor,
+                        bank,
+                        config,
+                        synthetic_method=method,
+                    )[1]
+                    for method in config["synthetic_anomalies"]
+                ]
+            )
+            evidence_head = fit_positive_evidence_head(
+                evidence_normal_features,
+                synthetic_training_features,
+                seed=SEED,
+                normal_margin_quantile=config["evidence_normal_margin_quantile"],
+            )
+            patch_score_mean = float(evidence_normal_scores.mean())
+            patch_score_std = max(float(evidence_normal_scores.std()), 1e-6)
+            calibration_rows = evidence_split.valid
+        else:
+            calibration_rows = split.valid
+        artifact_for_scoring = {
+            "config": config,
+            "positive_evidence_head": evidence_head,
+            "patch_score_mean": patch_score_mean,
+            "patch_score_std": patch_score_std,
+        }
+        normal_patch_scores, normal_features = score_frame(
+            calibration_rows, TRAIN_ROOT, extractor, bank, config
         )
+        _, normal_evidence, normal_scores = combine_anomaly_evidence(
+            normal_patch_scores, normal_features, artifact_for_scoring
+        )
+        synthetic_parts = []
+        for method in config["synthetic_anomalies"]:
+            synthetic_patch_scores, synthetic_features = score_frame(
+                calibration_rows,
+                TRAIN_ROOT,
+                extractor,
+                bank,
+                config,
+                synthetic_method=method,
+            )
+            _, _, combined_synthetic = combine_anomaly_evidence(
+                synthetic_patch_scores, synthetic_features, artifact_for_scoring
+            )
+            synthetic_parts.append(combined_synthetic)
+        synthetic_scores = np.concatenate(synthetic_parts)
         calibrated = calibrate_anomaly_threshold(
             normal_scores,
             synthetic_scores,
@@ -593,12 +675,17 @@ if RUN_TRAINING:
                 "normal_score_mean": float(normal_scores.mean()),
                 "normal_score_std": float(normal_scores.std()),
                 "normal_validation_images": len(normal_scores),
+                "normal_positive_evidence_mean": float(normal_evidence.mean()),
+                "normal_positive_evidence_max": float(normal_evidence.max()),
             }
         )
         category_artifacts[category] = {
             "config": config,
             "model_key": key,
             "memory_bank": bank,
+            "positive_evidence_head": evidence_head,
+            "patch_score_mean": patch_score_mean,
+            "patch_score_std": patch_score_std,
             "calibration": calibrated,
         }
         print(category, config["model_name"], config["normal_augmentations"], calibrated)
@@ -642,6 +729,9 @@ else:
 # ## 6. Public/private inference
 
 # %%
+all_patchcore_scores = np.zeros(len(test_table), dtype=np.float64)
+all_patchcore_z = np.zeros(len(test_table), dtype=np.float64)
+all_positive_evidence = np.zeros(len(test_table), dtype=np.float64)
 all_scores = np.zeros(len(test_table), dtype=np.float64)
 all_labels = np.zeros(len(test_table), dtype=np.int64)
 inference_extractors = {}
@@ -652,15 +742,21 @@ for category, category_rows in test_table.groupby("category", sort=True):
     if key not in inference_extractors:
         inference_extractors[key] = build_extractor(config, load_pretrained=False)
         inference_extractors[key].load_state_dict(model_states[key])
-    row_scores = score_frame(
+    row_patchcore_scores, row_features = score_frame(
         category_rows,
         TEST_ROOT,
         inference_extractors[key],
         artifact["memory_bank"],
         config,
     )
+    row_patchcore_z, row_evidence, row_scores = combine_anomaly_evidence(
+        row_patchcore_scores, row_features, artifact
+    )
     threshold = artifact["calibration"]["selected_threshold"] * config["threshold_scale"]
     positions = category_rows.index.to_numpy()
+    all_patchcore_scores[positions] = row_patchcore_scores
+    all_patchcore_z[positions] = row_patchcore_z
+    all_positive_evidence[positions] = row_evidence
     all_scores[positions] = row_scores
     all_labels[positions] = (row_scores >= threshold).astype(np.int64)
     print(
@@ -668,12 +764,17 @@ for category, category_rows in test_table.groupby("category", sort=True):
         {
             "model": config["model_name"],
             "threshold": threshold,
+            "positive_evidence_images": int((row_evidence > 0).sum()),
+            "positive_evidence_max": float(row_evidence.max()),
             "predicted_anomalies": int((row_scores >= threshold).sum()),
         },
     )
 
 audit = test_table.copy()
-audit["anomaly_score"] = all_scores
+audit["patchcore_score"] = all_patchcore_scores
+audit["patchcore_z"] = all_patchcore_z
+audit["positive_evidence"] = all_positive_evidence
+audit["combined_score"] = all_scores
 audit["label"] = all_labels
 audit.to_csv(EXPERIMENT_DIR / f"{TASK_NAME}_{PHASE}_scores.csv", index=False)
 

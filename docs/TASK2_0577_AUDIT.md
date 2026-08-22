@@ -23,7 +23,7 @@ that code was absent from the executed notebook.
 |---|---|---|---|---|
 | Encoder | One `wide_resnet50_2` for all six categories | Executed configuration cell | Categories have different scale, texture, and layout | Pragmatic category specialization |
 | Normal memory | Identity images only | Executed configuration and memory-building cells | Legitimate orientation or mild lighting variation can appear anomalous | Limited category-specific normal invariance |
-| Synthetic positives | CutPaste only | Executed calibration cell | One corruption family does not represent blur, mixed/ghosted content, or dark curves | Evidence-driven synthetic calibration extension |
+| Synthetic positives | CutPaste only | Executed calibration cell | One corruption family does not represent mixed/ghosted content, short dark curves, or thin white lines | Evidence-driven positive-evidence extension |
 | Threshold | Synthetic balanced-accuracy optimum, with normal q99 reported but not selected | Executed calibration cell | Proxy balanced accuracy of 0.966-1.000 did not transfer to the 0.577 public result | Separate threshold-policy experiment |
 | Public predictions | 39 anomalies out of 480: `4, 9, 2, 6, 8, 10` by category | Executed public-inference output | Only 8.1% of samples were positive; the baseline may be too conservative | Test with aggregate score only |
 | Private protocol | Frozen model, memory, and thresholds | Notebook bundle/reload cells | No methodological gap | Preserve unchanged |
@@ -58,13 +58,12 @@ color augmentation.
 | category_05 | Four pieces with variable orientation/layout | Horizontal/vertical flips and 90-degree rotations |
 | category_06 | One object on black background with mild color variation | Small brightness, contrast, and warm/cool changes |
 
-The user additionally observed mixed/ghosted content, blur, and a dark bold curve as defect
-families. The revised notebook models these as **synthetic anomalies for calibration**, not as
-normal augmentation. MixUp starts with one normal image, selects a different random normal image
-from the same category, and blends 25-45% of the partner into the base image. The initial
-specialized preset tests CutPaste, MixUp, blur, and dark-curve calibration in every category because
-no category-specific defect assignment was supplied. The explicit policy dictionary makes it safe
-to remove a family from one category later. These are configurable hypotheses, not manually
+Follow-up inspection corrected blur's role: mild blur is legitimate normal variation, so
+`blur_mild` now expands the normal memory bank. Low-opacity CutMix, short internal dark curves, and
+short thin white lines are synthetic positives. They train a small auxiliary evidence head whose
+clamped output can only increase the open-set PatchCore score. Absence of these known patterns adds
+zero and cannot make another kind of anomaly look more normal. Held-out normal scores, rather than
+synthetic examples, set the final threshold. These remain configurable hypotheses, not manually
 assigned public labels.
 
 ## Controlled public experiments
@@ -76,7 +75,7 @@ Use the presets in this order:
 2. `category_models_only`: change category backbone/resolution/memory capacity while preserving
    identity-only memory and CutPaste calibration. This isolates model specialization.
 3. `category_augmented`: keep the specialized models, add limited normal invariance and the
-   observed synthetic anomaly families, then use the stated per-category normal quantiles.
+   one-way learned positive evidence, then use the stated per-category normal quantiles.
 4. Only for the better preset, compare the generated global threshold scales.
 
 Do not compare two runs as a model ablation if model, normal augmentation, synthetic calibration,
