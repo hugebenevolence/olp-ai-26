@@ -113,13 +113,18 @@ The notebook defaults to:
 ```python
 PERSISTENT_DIR = Path("/content/drive/MyDrive/olpai26/task2_artifacts")
 PERSIST_AUGMENTATION_AUDIT = True
+AUGMENTATION_AUDIT_MODE = "sample"  # sample | all
 AUGMENTATION_AUDIT_SAMPLES = 4
+SHOW_ALL_AUGMENTATION_PLOTS = True
 ```
 
 Before feature extraction it writes originals, every configured normal transform, every synthetic
 anomaly, a contact sheet per category, `augmentation_manifest.csv`, and
 `augmentation_config.json`. The folder name is a 12-character configuration hash, so changing a
 method or severity produces a new comparison folder instead of overwriting the old evidence.
+All six category contact sheets are also rendered directly in the notebook. Use `mode="sample"`
+during contest iteration. `mode="all"` persists every transform in bounded batches but can create
+tens of thousands of PNGs and make Drive synchronization slow.
 
 Tune severity through `DEFAULT_SYNTHETIC_PARAMETERS`:
 

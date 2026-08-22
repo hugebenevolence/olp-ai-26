@@ -82,7 +82,9 @@ PERSISTENT_DIR = (
 )
 PRIVATE_ZIP_PASSWORD = None
 PERSIST_AUGMENTATION_AUDIT = True
-AUGMENTATION_AUDIT_SAMPLES = 4  # per category; raise carefully because every method writes PNGs
+AUGMENTATION_AUDIT_MODE = "sample"  # sample | all
+AUGMENTATION_AUDIT_SAMPLES = 4  # per category when mode="sample"
+SHOW_ALL_AUGMENTATION_PLOTS = True
 if "google.colab" in sys.modules and (
     str(OFFICIAL_DATA_SOURCE).startswith("/content/drive") or PERSISTENT_DIR
 ):
@@ -311,7 +313,7 @@ print("Test counts:\n", test_table["category"].value_counts().sort_index())
 
 # %%
 PREVIEW_CATEGORY = "category_06"
-SHOW_TRANSFORM_PREVIEW = True
+SHOW_TRANSFORM_PREVIEW = False  # all categories are rendered by the persisted audit below
 
 
 def preview_category_transforms(category, *, rows=None, save_path=None):
@@ -336,7 +338,7 @@ def preview_category_transforms(category, *, rows=None, save_path=None):
     )
     panels.extend(
         (
-            f"synthetic anomaly: {name}",
+            f"synthetic: {name}\n{config['synthetic_parameters'].get(name, {})}",
             apply_synthetic_anomaly(
                 preview_batch,
                 name,
@@ -380,6 +382,8 @@ if SHOW_TRANSFORM_PREVIEW:
 
 def export_augmentation_audit():
     """Persist representative originals/transforms and return their audit manifest."""
+    if AUGMENTATION_AUDIT_MODE not in {"sample", "all"}:
+        raise ValueError("AUGMENTATION_AUDIT_MODE must be 'sample' or 'all'")
     if AUGMENTATION_AUDIT_SAMPLES < 1:
         raise ValueError("AUGMENTATION_AUDIT_SAMPLES must be positive")
     payload = json.dumps(CATEGORY_CONFIGS, sort_keys=True)
@@ -389,7 +393,11 @@ def export_augmentation_audit():
     for category in CATEGORIES:
         config = CATEGORY_CONFIGS[category]
         category_rows = train_table.loc[train_table["category"] == category]
-        count = min(AUGMENTATION_AUDIT_SAMPLES, len(category_rows))
+        count = (
+            len(category_rows)
+            if AUGMENTATION_AUDIT_MODE == "all"
+            else min(AUGMENTATION_AUDIT_SAMPLES, len(category_rows))
+        )
         positions = np.linspace(0, len(category_rows) - 1, num=count, dtype=int)
         selected = category_rows.iloc[positions].reset_index(drop=True)
         dataset = AnomalyImageDataset(selected, root=TRAIN_ROOT, image_size=config["image_size"])
@@ -442,16 +450,25 @@ def export_augmentation_audit():
             rows=selected,
             save_path=audit_root / category / "contact_sheet.png",
         )
+        if SHOW_ALL_AUGMENTATION_PLOTS:
+            print(f"Augmentation preview: {category}")
+            plt.show()
         plt.close(figure)
     manifest = pd.DataFrame(records)
     manifest.to_csv(audit_root / "augmentation_manifest.csv", index=False)
     (audit_root / "augmentation_config.json").write_text(payload, encoding="utf-8")
-    sync_artifacts(
+    copied = sync_artifacts(
         paths.output_dir,
         paths.persistent_dir,
         patterns=("*.png", "augmentation_manifest.csv", "augmentation_config.json"),
     )
-    print("Persisted augmentation audit:", audit_root)
+    print("Local augmentation audit:", audit_root)
+    if paths.persistent_dir is not None:
+        persistent_root = paths.persistent_dir / audit_root.relative_to(paths.output_dir)
+        print("Persistent augmentation audit:", persistent_root)
+        print("Files copied to persistent storage:", len(copied))
+    else:
+        print("WARNING: PERSISTENT_DIR=None; PNGs disappear when the runtime resets")
     return manifest
 
 
