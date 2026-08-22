@@ -1,11 +1,11 @@
 # %% [markdown]
 # # Task 2 - DINOv2 with protected clean and augmented normal memories
 #
-# This is a separate controlled candidate derived from the 0.719 `anomalydino_448` run. DINOv2,
-# cosine 1-NN, top-1% tail scoring, square 448-pixel preprocessing, and normal-only quantile
-# calibration remain unchanged. The only methodological change is a second memory bank containing
-# known-normal transformations. Clean patches retain their full allocation and are never replaced
-# by augmented patches. Synthetic defects and the auxiliary evidence head are deliberately disabled.
+# This candidate produced 0.737 with synthetic evidence disabled. DINOv2, cosine 1-NN, top-1%
+# tail scoring, square 448-pixel preprocessing, and the protected clean/augmented normal memories
+# remain unchanged. The optional one-way evidence branch learns only from the data-driven synthetic
+# defects inspected earlier. It may increase an anomaly score, but it can never lower the original
+# DINO score when an image does not resemble those synthetic defects.
 
 # %% [markdown]
 # ## Colab bootstrap
@@ -43,12 +43,16 @@ from olp_ai_26.cv.anomaly_detection import (
     AnomalyImageDataset,
     DinoV2PatchFeatureExtractor,
     apply_normal_augmentation,
+    apply_synthetic_anomaly,
     calibrate_anomaly_threshold,
+    fit_positive_evidence_head,
     load_official_training_table,
     patch_memory_features,
+    positive_evidence_scores,
     sample_memory_bank,
     select_anomaly_threshold,
     stage_official_task2_data,
+    synthetic_anomaly_defaults,
     validate_anomaly_submission,
 )
 
@@ -63,7 +67,7 @@ TEAM_NAME = "replace_team_name"
 TASK_NAME = "task2"
 PHASE = "public"  # public | private
 RUN_TRAINING = True
-EXPERIMENT_NAME = "anomalydino_normal_augmented"
+EXPERIMENT_NAME = "anomalydino_normal_augmented_evidence"
 
 OFFICIAL_DATA_SOURCE = (
     Path("/content/drive/MyDrive/olpai26/ThiChinhThucData.zip")
@@ -92,6 +96,13 @@ PERSIST_AUGMENTATION_AUDIT = True
 AUGMENTATION_AUDIT_SAMPLES = 4
 SHOW_AUGMENTATION_PLOTS = True
 
+# Set this to False to reproduce the executed 0.737 method exactly. When True, the normal-memory
+# path is unchanged and a separate, non-negative synthetic-evidence term is added to its score.
+ENABLE_SYNTHETIC_EVIDENCE = True
+SYNTHETIC_EVIDENCE_WEIGHT = 0.25
+EVIDENCE_TRAIN_FRACTION = 0.25
+EVIDENCE_NORMAL_MARGIN_QUANTILE = 0.95
+
 SEED = 42
 NUM_WORKERS = 2
 if PHASE not in {"public", "private"}:
@@ -102,6 +113,10 @@ if AUGMENTATION_PROFILE not in {"category_policy", "blur_only"}:
     raise ValueError("AUGMENTATION_PROFILE must be 'category_policy' or 'blur_only'")
 if CLEAN_MEMORY_PATCHES < 1 or AUGMENTED_MEMORY_PATCHES < 1:
     raise ValueError("Both memory allocations must be positive")
+if not 0 < EVIDENCE_TRAIN_FRACTION < 1:
+    raise ValueError("EVIDENCE_TRAIN_FRACTION must be between zero and one")
+if SYNTHETIC_EVIDENCE_WEIGHT < 0:
+    raise ValueError("SYNTHETIC_EVIDENCE_WEIGHT cannot be negative")
 
 if "google.colab" in sys.modules and (
     str(OFFICIAL_DATA_SOURCE).startswith("/content/drive") or PERSISTENT_DIR
@@ -169,6 +184,19 @@ NORMAL_QUANTILES = {
     "category_05": 0.975,
     "category_06": 0.95,
 }
+
+# Blur stays in the normal-memory policy above. These four transformations are synthetic positives
+# only: they never enter either normal bank. Remove one name from a category tuple for a clean
+# method ablation. The weaker MixUp range is deliberate so the generated samples remain plausible.
+SYNTHETIC_ANOMALY_POLICIES = {
+    category: ("mixup", "cutmix", "dark_curve", "white_line") for category in CATEGORIES
+}
+SYNTHETIC_PARAMETERS_BY_CATEGORY = {
+    category: synthetic_anomaly_defaults() for category in CATEGORIES
+}
+for category_parameters in SYNTHETIC_PARAMETERS_BY_CATEGORY.values():
+    category_parameters["mixup"]["mixup_alpha_range"] = (0.10, 0.25)
+
 config_table = pd.DataFrame(
     {
         category: {
@@ -177,6 +205,12 @@ config_table = pd.DataFrame(
             "clean_memory_patches": CLEAN_MEMORY_PATCHES,
             "augmented_memory_patches": AUGMENTED_MEMORY_PATCHES,
             "normal_augmentations": ACTIVE_AUGMENTATIONS[category],
+            "synthetic_positives": (
+                SYNTHETIC_ANOMALY_POLICIES[category] if ENABLE_SYNTHETIC_EVIDENCE else ()
+            ),
+            "positive_evidence_weight": (
+                SYNTHETIC_EVIDENCE_WEIGHT if ENABLE_SYNTHETIC_EVIDENCE else 0.0
+            ),
             "normal_quantile": NORMAL_QUANTILES[category],
             "distance": "cosine_1nn",
             "image_score": f"mean_top_{TOP_FRACTION:.2%}_patches",
@@ -216,13 +250,22 @@ print("Train counts:\n", train_table["category"].value_counts().sort_index())
 print("Test counts:\n", test_table["category"].value_counts().sort_index())
 
 # %% [markdown]
-# ## 3. Persist the exact normal augmentations before feature extraction
+# ## 3. Plot and persist every configured augmentation before feature extraction
 
 # %%
 
 
-def preview_category_augmentations(category, *, selected_rows, save_path):
-    """Render one original and every active known-normal transform for a category."""
+def preview_category_augmentations(
+    category: str,
+    *,
+    selected_rows: pd.DataFrame,
+    save_path: Path,
+):
+    """Render the exact normal and synthetic transforms configured for one category.
+
+    The figure is a required pre-training audit: use it to judge whether severity and geometry
+    resemble the observed competition images before spending Colab GPU time.
+    """
     dataset = AnomalyImageDataset(selected_rows, root=TRAIN_ROOT, image_size=IMAGE_SIZE)
     images = torch.stack([dataset[index] for index in range(len(dataset))])
     panels = [("original", images[0])]
@@ -230,6 +273,19 @@ def preview_category_augmentations(category, *, selected_rows, save_path):
         (method, apply_normal_augmentation(images, method)[0])
         for method in ACTIVE_AUGMENTATIONS[category]
     )
+    if ENABLE_SYNTHETIC_EVIDENCE:
+        panels.extend(
+            (
+                f"synthetic: {method}",
+                apply_synthetic_anomaly(
+                    images,
+                    method,
+                    seed=SEED + method_index,
+                    **SYNTHETIC_PARAMETERS_BY_CATEGORY[category][method],
+                )[0],
+            )
+            for method_index, method in enumerate(SYNTHETIC_ANOMALY_POLICIES[category])
+        )
     columns = 4
     rows = int(np.ceil(len(panels) / columns))
     figure, axes = plt.subplots(rows, columns, figsize=(4 * columns, 4 * rows), squeeze=False)
@@ -240,19 +296,27 @@ def preview_category_augmentations(category, *, selected_rows, save_path):
         axis.axis("off")
     for axis in flat_axes[len(panels) :]:
         axis.axis("off")
-    figure.suptitle(f"{category}: DINO normal-memory transforms", fontsize=14)
+    figure.suptitle(f"{category}: normal-memory versus synthetic-positive transforms", fontsize=14)
     figure.tight_layout()
     save_path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(save_path, dpi=150, bbox_inches="tight")
     return figure
 
 
-def export_normal_augmentation_audit():
-    """Save representative transformed PNGs, contact sheets, and a configuration manifest."""
+def export_normal_augmentation_audit() -> pd.DataFrame:
+    """Save representative PNGs, contact sheets, and the exact augmentation manifest.
+
+    Clean and known-normal outputs are stored separately from synthetic-positive outputs so it is
+    visually obvious which samples enter normal memory and which train only the auxiliary head.
+    """
     payload = json.dumps(
         {
             "profile": AUGMENTATION_PROFILE,
             "augmentations": ACTIVE_AUGMENTATIONS,
+            "synthetic_evidence_enabled": ENABLE_SYNTHETIC_EVIDENCE,
+            "synthetic_policies": SYNTHETIC_ANOMALY_POLICIES,
+            "synthetic_parameters": SYNTHETIC_PARAMETERS_BY_CATEGORY,
+            "synthetic_evidence_weight": SYNTHETIC_EVIDENCE_WEIGHT,
             "clean_memory_patches": CLEAN_MEMORY_PATCHES,
             "augmented_memory_patches": AUGMENTED_MEMORY_PATCHES,
         },
@@ -273,8 +337,26 @@ def export_normal_augmentation_audit():
             (method, apply_normal_augmentation(images, method))
             for method in ACTIVE_AUGMENTATIONS[category]
         )
+        if ENABLE_SYNTHETIC_EVIDENCE:
+            transforms.extend(
+                (
+                    method,
+                    apply_synthetic_anomaly(
+                        images,
+                        method,
+                        seed=SEED + method_index,
+                        **SYNTHETIC_PARAMETERS_BY_CATEGORY[category][method],
+                    ),
+                )
+                for method_index, method in enumerate(SYNTHETIC_ANOMALY_POLICIES[category])
+            )
         for method, transformed in transforms:
-            transform_type = "clean" if method == "identity" else "augmented_normal"
+            if method == "identity":
+                transform_type = "clean"
+            elif method in ACTIVE_AUGMENTATIONS[category]:
+                transform_type = "augmented_normal"
+            else:
+                transform_type = "synthetic_positive"
             for index, row in selected.iterrows():
                 output = audit_root / category / transform_type / method / f"{row.sample_id}.png"
                 output.parent.mkdir(parents=True, exist_ok=True)
@@ -295,7 +377,7 @@ def export_normal_augmentation_audit():
             save_path=audit_root / category / "contact_sheet.png",
         )
         if SHOW_AUGMENTATION_PLOTS:
-            print(f"Normal augmentation preview: {category}")
+            print(f"Normal and synthetic augmentation preview: {category}")
             plt.show()
         plt.close(figure)
     manifest = pd.DataFrame(records)
@@ -322,7 +404,7 @@ if RUN_TRAINING and PERSIST_AUGMENTATION_AUDIT:
 # %%
 
 
-def build_extractor(*, load_pretrained):
+def build_extractor(*, load_pretrained: bool) -> DinoV2PatchFeatureExtractor:
     """Build the frozen DINOv2-S/14 extractor used by both public and private inference."""
     return (
         DinoV2PatchFeatureExtractor(
@@ -349,7 +431,10 @@ def iter_memory_patch_batches(frame, extractor, augmentations):
                 yield extractor(transformed).float().cpu()
 
 
-def combined_memory_bank(clean_memory, augmented_memory):
+def combined_memory_bank(
+    clean_memory: torch.Tensor,
+    augmented_memory: torch.Tensor,
+) -> torch.Tensor:
     """Concatenate protected clean and augmented banks for exact nearest-neighbour lookup."""
     if clean_memory.ndim != 2 or augmented_memory.ndim != 2:
         raise ValueError("Both memory banks must be matrices")
@@ -359,14 +444,52 @@ def combined_memory_bank(clean_memory, augmented_memory):
 
 
 @torch.inference_mode()
-def score_frame(frame, root, extractor, clean_memory, augmented_memory):
-    """Score rows using the nearest cosine match across both normal memory banks."""
+def score_frame(
+    frame: pd.DataFrame,
+    root: Path,
+    extractor: DinoV2PatchFeatureExtractor,
+    clean_memory: torch.Tensor,
+    augmented_memory: torch.Tensor,
+    *,
+    synthetic_method: str | None = None,
+) -> tuple[np.ndarray, torch.Tensor]:
+    """Return DINO image scores and six patch-distance features for rows in order.
+
+    Args:
+        frame: Metadata rows containing each image's relative path.
+        root: Directory against which the relative paths are resolved.
+        extractor: Frozen DINOv2 patch-token extractor.
+        clean_memory: Protected memory sampled only from original normal images.
+        augmented_memory: Separate memory sampled only from known-normal transforms.
+        synthetic_method: Optional synthetic-positive transform applied before feature extraction.
+
+    Returns:
+        A NumPy vector containing the top-1%-tail DINO score and a tensor containing six
+        patch-distance summaries per image. Synthetic images are scored against the same unchanged
+        normal memories as clean images.
+    """
     dataset = AnomalyImageDataset(frame, root=root, image_size=IMAGE_SIZE)
     loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False, **loader_options)
     bank = combined_memory_bank(clean_memory, augmented_memory).to(DEVICE)
     scores = []
     feature_rows = []
-    for images in loader:
+    for batch_index, images in enumerate(loader):
+        if synthetic_method is not None:
+            # MixUp needs a distinct partner. Supply the first dataset image if the final loader
+            # batch contains only one row; otherwise the shared helper pairs rows within the batch.
+            single_mixup = synthetic_method == "mixup" and len(images) == 1
+            transform_input = (
+                torch.cat((images, dataset[0].unsqueeze(0)), dim=0) if single_mixup else images
+            )
+            transformed = apply_synthetic_anomaly(
+                transform_input,
+                synthetic_method,
+                seed=SEED + batch_index,
+                **SYNTHETIC_PARAMETERS_BY_CATEGORY[str(frame["category"].iloc[0])][
+                    synthetic_method
+                ],
+            )
+            images = transformed[:1] if single_mixup else transformed
         with torch.autocast(DEVICE, dtype=AMP_DTYPE, enabled=DEVICE == "cuda"):
             embeddings = extractor(images.to(DEVICE)).float()
         features = patch_memory_features(
@@ -382,11 +505,38 @@ def score_frame(frame, root, extractor, clean_memory, augmented_memory):
     return np.asarray(scores, dtype=np.float64), torch.cat(feature_rows)
 
 
+def combine_anomaly_evidence(
+    dino_scores: np.ndarray,
+    features: torch.Tensor,
+    artifact: dict[str, object],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Add known-defect evidence without ever subtracting from the open-set DINO score.
+
+    The logistic head recognizes the synthetic directions only. Its margin-adjusted output is
+    clamped at zero, scaled into DINO-score units, and then added. Consequently, an unknown anomaly
+    that matches none of MixUp, CutMix, dark-curve, or white-line evidence keeps its original DINO
+    score instead of being pushed toward normal.
+
+    Returns:
+        ``(positive_evidence, combined_score)`` vectors in input-row order.
+    """
+    base = np.asarray(dino_scores, dtype=np.float64)
+    head = artifact.get("positive_evidence_head")
+    weight = float(artifact.get("positive_evidence_weight", 0.0))
+    if head is None or weight <= 0:
+        return np.zeros_like(base), base.copy()
+    evidence = positive_evidence_scores(features, head).numpy().astype(np.float64)
+    score_scale = max(float(artifact["dino_score_std"]), 1e-6)
+    return evidence, base + weight * score_scale * evidence
+
+
 # %% [markdown]
-# ## 5. Fit protected clean/augmented memories and normal-only thresholds
+# ## 5. Fit normal memories, optional positive-evidence heads, and thresholds
 #
-# The validation images are never inserted into either memory. Synthetic anomaly calibration is
-# absent, so the only experiment change relative to the 0.719 run is expanded known-normal memory.
+# The outer validation images never enter either memory. With synthetic evidence enabled, only 25%
+# of that held-out set trains the small six-feature logistic head; the remaining 75% independently
+# calibrates the final threshold. The synthetic samples are diagnostic proxy positives, never normal
+# memory. Threshold selection remains normal-only, so proxy separability cannot choose the cutoff.
 
 # %%
 if RUN_TRAINING:
@@ -405,15 +555,93 @@ if RUN_TRAINING:
             max_patches=AUGMENTED_MEMORY_PATCHES,
             seed=SEED + 1000,
         )
-        normal_scores, _ = score_frame(
-            split.valid,
+        evidence_head = None
+        dino_score_std = 1.0
+        positive_weight = SYNTHETIC_EVIDENCE_WEIGHT if ENABLE_SYNTHETIC_EVIDENCE else 0.0
+        calibration_rows = split.valid
+        if ENABLE_SYNTHETIC_EVIDENCE:
+            evidence_split = make_split(
+                split.valid,
+                valid_size=1.0 - EVIDENCE_TRAIN_FRACTION,
+                seed=SEED + 1,
+            )
+            evidence_dino_scores, evidence_normal_features = score_frame(
+                evidence_split.train,
+                TRAIN_ROOT,
+                extractor,
+                clean_memory,
+                augmented_memory,
+            )
+            synthetic_training_features = torch.cat(
+                [
+                    score_frame(
+                        evidence_split.train,
+                        TRAIN_ROOT,
+                        extractor,
+                        clean_memory,
+                        augmented_memory,
+                        synthetic_method=method,
+                    )[1]
+                    for method in SYNTHETIC_ANOMALY_POLICIES[category]
+                ]
+            )
+            evidence_head = fit_positive_evidence_head(
+                evidence_normal_features,
+                synthetic_training_features,
+                seed=SEED,
+                normal_margin_quantile=EVIDENCE_NORMAL_MARGIN_QUANTILE,
+            )
+            dino_score_std = max(float(evidence_dino_scores.std()), 1e-6)
+            calibration_rows = evidence_split.valid
+
+        artifact_for_scoring = {
+            "positive_evidence_head": evidence_head,
+            "positive_evidence_weight": positive_weight,
+            "dino_score_std": dino_score_std,
+        }
+        normal_dino_scores, normal_features = score_frame(
+            calibration_rows,
             TRAIN_ROOT,
             extractor,
             clean_memory,
             augmented_memory,
         )
+        normal_evidence, normal_scores = combine_anomaly_evidence(
+            normal_dino_scores,
+            normal_features,
+            artifact_for_scoring,
+        )
+        control_normal_scores = (
+            np.concatenate((evidence_dino_scores, normal_dino_scores))
+            if ENABLE_SYNTHETIC_EVIDENCE
+            else normal_dino_scores
+        )
+        control_calibration = calibrate_anomaly_threshold(
+            control_normal_scores,
+            normal_quantile=NORMAL_QUANTILES[category],
+        )
+        dino_only_threshold = select_anomaly_threshold(control_calibration, "normal_quantile")
+        synthetic_score_parts = []
+        if ENABLE_SYNTHETIC_EVIDENCE:
+            for method in SYNTHETIC_ANOMALY_POLICIES[category]:
+                synthetic_dino_scores, synthetic_features = score_frame(
+                    calibration_rows,
+                    TRAIN_ROOT,
+                    extractor,
+                    clean_memory,
+                    augmented_memory,
+                    synthetic_method=method,
+                )
+                _, synthetic_scores = combine_anomaly_evidence(
+                    synthetic_dino_scores,
+                    synthetic_features,
+                    artifact_for_scoring,
+                )
+                synthetic_score_parts.append(synthetic_scores)
+        synthetic_scores = np.concatenate(synthetic_score_parts) if synthetic_score_parts else None
         calibration = calibrate_anomaly_threshold(
             normal_scores,
+            synthetic_scores,
             normal_quantile=NORMAL_QUANTILES[category],
         )
         calibration["selected_threshold"] = select_anomaly_threshold(calibration, "normal_quantile")
@@ -421,7 +649,16 @@ if RUN_TRAINING:
             {
                 "normal_score_mean": float(normal_scores.mean()),
                 "normal_score_std": float(normal_scores.std()),
+                "normal_dino_score_mean": float(normal_dino_scores.mean()),
+                "normal_dino_score_std": float(normal_dino_scores.std()),
+                "normal_positive_evidence_mean": float(normal_evidence.mean()),
+                "normal_positive_evidence_max": float(normal_evidence.max()),
                 "normal_validation_images": len(normal_scores),
+                "dino_only_validation_images": len(control_normal_scores),
+                "dino_only_threshold": dino_only_threshold,
+                "evidence_training_images": (
+                    len(evidence_split.train) if ENABLE_SYNTHETIC_EVIDENCE else 0
+                ),
                 "clean_memory_patches": len(clean_memory),
                 "augmented_memory_patches": len(augmented_memory),
             }
@@ -430,6 +667,14 @@ if RUN_TRAINING:
             "clean_memory": clean_memory,
             "augmented_memory": augmented_memory,
             "normal_augmentations": ACTIVE_AUGMENTATIONS[category],
+            "synthetic_anomalies": (
+                SYNTHETIC_ANOMALY_POLICIES[category] if ENABLE_SYNTHETIC_EVIDENCE else ()
+            ),
+            "synthetic_parameters": SYNTHETIC_PARAMETERS_BY_CATEGORY[category],
+            "positive_evidence_head": evidence_head,
+            "positive_evidence_weight": positive_weight,
+            "dino_score_std": dino_score_std,
+            "dino_only_threshold": dino_only_threshold,
             "normal_quantile": NORMAL_QUANTILES[category],
             "calibration": calibration,
         }
@@ -437,11 +682,18 @@ if RUN_TRAINING:
             category,
             {
                 "augmentations": ACTIVE_AUGMENTATIONS[category],
+                "synthetic_positives": (
+                    SYNTHETIC_ANOMALY_POLICIES[category] if ENABLE_SYNTHETIC_EVIDENCE else ()
+                ),
+                "positive_evidence_weight": positive_weight,
                 "clean_memory": len(clean_memory),
                 "augmented_memory": len(augmented_memory),
                 "threshold": calibration["selected_threshold"],
+                "dino_only_control_threshold": dino_only_threshold,
                 "normal_mean": calibration["normal_score_mean"],
                 "normal_std": calibration["normal_score_std"],
+                "normal_positive_evidence_mean": calibration["normal_positive_evidence_mean"],
+                "proxy_balanced_accuracy": calibration["proxy_balanced_accuracy"],
             },
         )
     bundle = {
@@ -450,6 +702,10 @@ if RUN_TRAINING:
         "model_name": MODEL_NAME,
         "image_size": IMAGE_SIZE,
         "top_fraction": TOP_FRACTION,
+        "synthetic_evidence_enabled": ENABLE_SYNTHETIC_EVIDENCE,
+        "synthetic_evidence_weight": (
+            SYNTHETIC_EVIDENCE_WEIGHT if ENABLE_SYNTHETIC_EVIDENCE else 0.0
+        ),
         "seed": SEED,
         "model_state": model_state,
         "categories": category_artifacts,
@@ -473,6 +729,8 @@ else:
         raise ValueError("Loaded bundle does not match EXPERIMENT_NAME")
     if bundle["augmentation_profile"] != AUGMENTATION_PROFILE:
         raise ValueError("Loaded bundle does not match AUGMENTATION_PROFILE")
+    if bundle["synthetic_evidence_enabled"] != ENABLE_SYNTHETIC_EVIDENCE:
+        raise ValueError("Loaded bundle does not match ENABLE_SYNTHETIC_EVIDENCE")
     extractor = build_extractor(load_pretrained=False)
     extractor.load_state_dict(bundle["model_state"])
     category_artifacts = bundle["categories"]
@@ -482,34 +740,50 @@ else:
 # ## 6. Public/private inference and score audit
 
 # %%
+all_dino_scores = np.zeros(len(test_table), dtype=np.float64)
+all_positive_evidence = np.zeros(len(test_table), dtype=np.float64)
 all_scores = np.zeros(len(test_table), dtype=np.float64)
 all_labels = np.zeros(len(test_table), dtype=np.int64)
+all_dino_only_labels = np.zeros(len(test_table), dtype=np.int64)
 for category, category_rows in test_table.groupby("category", sort=True):
     artifact = category_artifacts[category]
-    row_scores, _ = score_frame(
+    row_dino_scores, row_features = score_frame(
         category_rows,
         TEST_ROOT,
         extractor,
         artifact["clean_memory"],
         artifact["augmented_memory"],
     )
+    row_evidence, row_scores = combine_anomaly_evidence(
+        row_dino_scores,
+        row_features,
+        artifact,
+    )
     threshold = artifact["calibration"]["selected_threshold"]
     positions = category_rows.index.to_numpy()
+    all_dino_scores[positions] = row_dino_scores
+    all_positive_evidence[positions] = row_evidence
     all_scores[positions] = row_scores
     all_labels[positions] = (row_scores >= threshold).astype(np.int64)
+    all_dino_only_labels[positions] = (row_dino_scores >= artifact["dino_only_threshold"]).astype(
+        np.int64
+    )
     print(
         category,
         {
             "threshold": threshold,
-            "score_min": float(row_scores.min()),
-            "score_median": float(np.median(row_scores)),
-            "score_max": float(row_scores.max()),
+            "dino_score_median": float(np.median(row_dino_scores)),
+            "positive_evidence_images": int((row_evidence > 0).sum()),
+            "positive_evidence_max": float(row_evidence.max()),
+            "combined_score_median": float(np.median(row_scores)),
             "predicted_anomalies": int((row_scores >= threshold).sum()),
         },
     )
 
 audit = test_table.copy()
-audit["anomaly_score"] = all_scores
+audit["dino_score"] = all_dino_scores
+audit["positive_evidence"] = all_positive_evidence
+audit["combined_score"] = all_scores
 audit["label"] = all_labels
 audit.to_csv(EXPERIMENT_DIR / f"{TASK_NAME}_{PHASE}_scores.csv", index=False)
 
@@ -519,7 +793,10 @@ audit.to_csv(EXPERIMENT_DIR / f"{TASK_NAME}_{PHASE}_scores.csv", index=False)
 # %%
 
 
-def write_submission_candidate(labels, tag="main"):
+def write_submission_candidate(
+    labels: np.ndarray,
+    tag: str = "main",
+) -> tuple[pd.DataFrame, Path]:
     """Write one isolated candidate with the exact official CSV and ZIP structure."""
     candidate_dir = EXPERIMENT_DIR / f"candidate_{tag}"
     candidate_dir.mkdir(parents=True, exist_ok=True)
@@ -540,12 +817,23 @@ def write_submission_candidate(labels, tag="main"):
 
 
 submission, zip_path = write_submission_candidate(all_labels)
+if ENABLE_SYNTHETIC_EVIDENCE:
+    control_submission, control_zip_path = write_submission_candidate(
+        all_dino_only_labels,
+        tag="dino_only_control",
+    )
 sync_artifacts(
     paths.output_dir,
     paths.persistent_dir,
     patterns=("*.pt", "*.json", "*.csv", "*.zip"),
 )
 print(zip_path, submission["label"].value_counts().to_dict())
+if ENABLE_SYNTHETIC_EVIDENCE:
+    print(
+        control_zip_path,
+        control_submission["label"].value_counts().to_dict(),
+        "Exact no-synthetic control from the same memories and complete outer validation split",
+    )
 submission.head()
 
 # %% [markdown]

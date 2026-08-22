@@ -114,12 +114,39 @@ head to isolate the backbone/scoring change. See
 [`TASK2_ANOMALYDINO_RESEARCH.md`](TASK2_ANOMALYDINO_RESEARCH.md) for the primary-source comparison,
 gap table, and known departures from the paper.
 
-After recording the 0.719 DINO-only result, use
+After recording the 0.719 DINO-only result, the protected normal-memory candidate reached 0.737.
+Use
 `notebooks/image_anomaly_detection_dino_augmented_template.ipynb` for the separate normal-
 augmentation experiment. It preserves all 32,768 clean patches and adds a distinct 16,384-patch
 augmented bank, preventing transformed patches from displacing the clean reference memory. Its
 `AUGMENTATION_PROFILE` switch selects the complete prior category policy or the narrower blur-only
-ablation. Synthetic defects remain disabled in this notebook.
+ablation.
+
+The same notebook now exposes a controlled one-way synthetic branch. Set
+`ENABLE_SYNTHETIC_EVIDENCE = False` to reproduce the 0.737 method, or `True` to train on inspected
+MixUp, low-opacity CutMix, short internal dark curves, and short thin internal white lines. Mild blur
+remains normal variation and never receives an anomaly label. Synthetic images never enter the
+normal memory banks.
+
+### What changed in the executed 0.737 run
+
+The directly executed notebook logs show the following comparison with the 0.719 DINO-only run:
+
+| Category | DINO-only threshold | Augmented-memory threshold | DINO-only anomaly calls | Augmented anomaly calls |
+|---|---:|---:|---:|---:|
+| category_01 | 0.17503 | 0.15261 | 10 | 15 |
+| category_02 | 0.15627 | 0.13686 | 18 | 22 |
+| category_03 | 0.13766 | 0.13243 | 21 | 21 |
+| category_04 | 0.17777 | 0.15654 | 24 | 26 |
+| category_05 | 0.17899 | 0.17124 | 20 | 20 |
+| category_06 | 0.13233 | 0.12736 | 32 | 30 |
+
+The predicted-anomaly total rose from 125 to 134. Held-out normal means fell in every category, by
+about 2.9% to 7.3%, and every normal-quantile threshold fell with them. This is consistent with the
+extra normal memory making DINO more invariant to observed benign variation while the recalibrated
+threshold recovered some previously missed anomalies. It is not proof that each extra call was a
+true positive, nor that any individual transform caused the gain: only one aggregate public score
+was observed while multiple category policies changed together.
 
 Every category configuration stores `model_name`, `image_size`, `batch_size`,
 `max_memory_patches`, `top_k`, `normal_augmentations`, `synthetic_anomalies`, `normal_quantile`,
@@ -135,6 +162,26 @@ combined_score = patchcore_z + positive_evidence_weight * max(0, auxiliary_logit
 Absence of a known synthetic pattern contributes zero. It cannot suppress a novel anomaly found by
 PatchCore. Set `positive_evidence_weight = 0.0` to disable the auxiliary head without changing the
 rest of the pipeline.
+
+The DINO augmented notebook uses the same rule without replacing DINO's raw score scale:
+
+```python
+combined_score = (
+    dino_score
+    + SYNTHETIC_EVIDENCE_WEIGHT
+    * heldout_dino_score_std
+    * max(0, auxiliary_logit - normal_margin)
+)
+```
+
+Start with `SYNTHETIC_EVIDENCE_WEIGHT = 0.25`. A value of `0.0` makes the head inert; larger values
+make known synthetic patterns more influential but still cannot reduce any DINO score.
+
+When evidence is enabled, one Colab run writes both `candidate_main` and
+`candidate_dino_only_control`. The control uses the identical clean/augmented memories and the
+normal-only threshold calibrated from the complete outer validation split; use it to confirm the
+0.737-style behavior without retraining. Submit the evidence candidate and control as separate
+public experiments, not as an ensemble.
 
 ## Persisted augmentation audit
 
@@ -161,7 +208,7 @@ Tune severity through `DEFAULT_SYNTHETIC_PARAMETERS`:
 ```python
 DEFAULT_SYNTHETIC_PARAMETERS = {
     "cutpaste": {"cutpaste_area_range": (0.03, 0.15)},
-    "mixup": {"mixup_alpha_range": (0.25, 0.45)},
+    "mixup": {"mixup_alpha_range": (0.10, 0.25)},  # DINO candidate override
     "cutmix": {
         "cutmix_area_range": (0.025, 0.10),
         "cutmix_opacity_range": (0.06, 0.14),
@@ -199,8 +246,9 @@ scoring is too slow, reduce `max_memory_patches`; this has the largest direct ef
 
 ## Score audit
 
-The inference CSV beside each submission records `patchcore_score`, standardized `patchcore_z`,
-non-negative `positive_evidence`, `combined_score`, and final `label`. Use these columns to check
+The original template's inference CSV records `patchcore_score`, standardized `patchcore_z`,
+non-negative `positive_evidence`, `combined_score`, and final `label`. The DINO augmented notebook
+records `dino_score`, `positive_evidence`, `combined_score`, and `label`. Use these columns to check
 whether a submission changed because of open-set distance, the learned known-defect signal, or the
 threshold. The submitted CSV still contains only the three official columns.
 
