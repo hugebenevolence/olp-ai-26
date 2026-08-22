@@ -203,13 +203,65 @@ normal-reference local-context representation and does **not** perform MuSc's tr
 against public/private test images. Primary sources: [MuSc paper](https://arxiv.org/abs/2401.16753)
 and [official implementation](https://github.com/xrli-U/MuSc).
 
-One run writes three method candidates at the already selected scale 0.85:
+The first local-context revision wrote three diagnostic method candidates at the already selected
+scale 0.85:
 
 - `candidate_main`: degrees `{1,3}` plus synthetic positive evidence.
 - `candidate_multidegree_no_synthetic`: degrees `{1,3}` without the synthetic head.
 - `candidate_native_degree_1_no_synthetic`: native patches only, without the synthetic head.
 
 These are representation/evidence ablations, not another threshold sweep.
+
+### Current next run: local patch adapter with fixed-count rank fusion
+
+The current `image_anomaly_detection_dino_augmented_template.ipynb` keeps the 0.769 pipeline as its
+base ranking and adds one lightweight category-specific logistic classifier over frozen native
+DINO patch tokens. It does not fine-tune DINO. This makes the extra run practical on Colab while
+testing the data-driven defect directions more directly than the six-statistic image head.
+
+Adapter labels are generated in pixel space:
+
+```python
+changed_pixels = abs(synthetic_image - clean_image).amax(channel)
+changed_patches = adaptive_max_pool(changed_pixels, dino_grid) >= 0.015
+changed_patches = dilate(changed_patches, radius=1)
+```
+
+Changed patches from low-opacity CutMix, short dark curves, and thin white lines are positive.
+Patches from clean images and all configured known-normal transformations, including mild blur, are
+negative. `mixup` remains available to the image-level synthetic-evidence head but is deliberately
+excluded from the patch adapter: MixUp changes almost the entire image, so it cannot produce a
+credible local defect mask.
+
+The adapter uses at most 8,192 normal and 8,192 positive tokens per category. Its inference score
+is the mean of the highest 1% non-negative patch logits. That score is not added in raw units to
+DINO distance. Instead, both signals are converted to within-category ordinal percentile ranks:
+
+```python
+fused_rank = (1 - patch_weight) * base_rank + patch_weight * patch_adapter_rank
+```
+
+The notebook then selects an exact anomaly count for every category. For the 80-image public set,
+the counts are copied from the winning scale-0.85 submission: `{27, 25, 29, 40, 24, 44}`, totaling
+189. This holds the decision operating point constant and tests only which samples should occupy
+those anomaly slots. For a 160-image private category, the notebook transfers the same proportion.
+
+One run produces exactly five new ZIP candidates:
+
+| Candidate | Patch weight | Purpose |
+|---|---:|---|
+| `rank_patch_w0.20` | 0.20 | Conservative base-dominant blend |
+| `rank_patch_w0.35` | 0.35 | Recommended first submission |
+| `rank_patch_w0.50` | 0.50 | Equal-rank blend; recommended second |
+| `rank_patch_w0.70` | 0.70 | Patch-dominant diagnostic |
+| `rank_patch_w1.00` | 1.00 | Patch-only stress test |
+
+The score audit adds `patch_adapter_score`, every fused-rank column, and every candidate label. It
+also prints the base/patch Spearman correlation by category and verifies the exact candidate counts.
+If `w0.35` or `w0.50` improves on 0.769, use the remaining submissions around the better side. If
+neither improves, the conservative `w0.20` and diagnostic `w0.70` reveal whether the local signal is
+weak or merely overweighted. Do not interpret this five-point method comparison as threshold-scale
+tuning: all five candidates have the same class totals.
 
 ## Persisted augmentation audit
 
@@ -276,9 +328,10 @@ scoring is too slow, reduce `max_memory_patches`; this has the largest direct ef
 
 The original template's inference CSV records `patchcore_score`, standardized `patchcore_z`,
 non-negative `positive_evidence`, `combined_score`, and final `label`. The DINO augmented notebook
-records `dino_score`, `positive_evidence`, `combined_score`, and `label`. Use these columns to check
-whether a submission changed because of open-set distance, the learned known-defect signal, or the
-threshold. The submitted CSV still contains only the three official columns.
+records `dino_score`, `positive_evidence`, `patch_adapter_score`, `combined_score`, every candidate's
+fused rank, and every candidate label. Use these columns to check whether a submission changed
+because of open-set distance, image-level known-defect evidence, or localized patch evidence. The
+submitted CSV still contains only the three official columns.
 
 ## Public threshold experiments
 

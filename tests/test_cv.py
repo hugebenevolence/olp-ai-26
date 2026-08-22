@@ -15,9 +15,11 @@ from olp_ai_26.cv.anomaly_detection import (
     apply_normal_augmentation,
     apply_synthetic_anomaly,
     calibrate_anomaly_threshold,
+    changed_patch_mask,
     cutpaste_batch,
     discover_normal_images,
     fit_positive_evidence_head,
+    fixed_count_rank_fusion,
     load_official_training_table,
     patch_memory_distances,
     patch_memory_features,
@@ -219,6 +221,67 @@ def test_anomaly_feature_memory_and_calibration(tmp_path):
     )
     assert torch.all(evidence >= 0)
     assert evidence[2:].mean() > evidence[:2].mean()
+
+
+def test_changed_patch_mask_preserves_thin_edits_and_dilates_context():
+    original = torch.zeros(1, 3, 8, 8)
+    transformed = original.clone()
+    transformed[:, :, 1, 1] = 0.25
+    native = changed_patch_mask(
+        original,
+        transformed,
+        grid_size=(4, 4),
+        difference_threshold=0.10,
+        dilation=0,
+    )
+    assert native.shape == (1, 16)
+    assert native.sum().item() == 1
+    assert native.reshape(1, 4, 4)[0, 0, 0]
+
+    dilated = changed_patch_mask(
+        original,
+        transformed,
+        grid_size=(4, 4),
+        difference_threshold=0.10,
+        dilation=1,
+    )
+    assert dilated.sum().item() == 4
+    assert not changed_patch_mask(
+        original,
+        transformed,
+        grid_size=(4, 4),
+        difference_threshold=0.30,
+        dilation=0,
+    ).any()
+
+
+def test_fixed_count_rank_fusion_preserves_count_and_changes_order():
+    base = [0.1, 0.2, 0.9, 0.8]
+    patch = [0.9, 0.8, 0.1, 0.2]
+    base_labels, base_ranks = fixed_count_rank_fusion(
+        base,
+        patch,
+        anomaly_count=2,
+        patch_weight=0.0,
+    )
+    patch_labels, patch_ranks = fixed_count_rank_fusion(
+        base,
+        patch,
+        anomaly_count=2,
+        patch_weight=1.0,
+    )
+    assert base_labels.tolist() == [0, 0, 1, 1]
+    assert patch_labels.tolist() == [1, 1, 0, 0]
+    assert base_labels.sum() == patch_labels.sum() == 2
+    assert base_ranks.argmax() == 2
+    assert patch_ranks.argmax() == 0
+    _, tied_ranks = fixed_count_rank_fusion(
+        base,
+        [0.0, 0.0, 0.0, 1.0],
+        anomaly_count=2,
+        patch_weight=1.0,
+    )
+    assert tied_ranks[:3].tolist() == [0.5, 0.5, 0.5]
 
 
 def test_anomalydino_extractor_and_cosine_tail_scoring():

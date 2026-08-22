@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 import shutil
 import zipfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -447,6 +447,55 @@ def aggregate_patch_neighborhoods(
     return F.normalize(pooled.flatten(2).transpose(1, 2), dim=-1)
 
 
+def changed_patch_mask(
+    original: torch.Tensor,
+    transformed: torch.Tensor,
+    *,
+    grid_size: tuple[int, int],
+    difference_threshold: float = 0.015,
+    dilation: int = 1,
+) -> torch.Tensor:
+    """Locate patch tokens touched by a synthetic image transformation.
+
+    The pixel-space maximum absolute channel difference is max-pooled into the feature extractor's
+    patch grid. This deliberately marks a patch when *any* pixel changed enough, which is suitable
+    for short curves and thin lines that average pooling could erase. Optional patch-grid dilation
+    includes immediate context around the edited region.
+
+    Args:
+        original: Clean images shaped ``[batch, channels, height, width]`` in the ``[0, 1]`` range.
+        transformed: Synthetic images with exactly the same shape as ``original``.
+        grid_size: Feature-token grid as ``(height, width)``.
+        difference_threshold: Minimum absolute pixel change required to mark a patch.
+        dilation: Number of patch-grid neighbors to include around each changed patch.
+
+    Returns:
+        Boolean mask shaped ``[batch, grid_height * grid_width]`` in token order.
+    """
+    if original.ndim != 4 or transformed.ndim != 4:
+        raise ValueError("Expected original and transformed images shaped [B,C,H,W]")
+    if original.shape != transformed.shape:
+        raise ValueError("Original and transformed image shapes must match")
+    if len(grid_size) != 2 or grid_size[0] < 1 or grid_size[1] < 1:
+        raise ValueError("grid_size must contain two positive integers")
+    if difference_threshold < 0:
+        raise ValueError("difference_threshold cannot be negative")
+    if dilation < 0:
+        raise ValueError("dilation cannot be negative")
+    pixel_difference = (transformed - original).abs().amax(dim=1, keepdim=True)
+    pooled_difference = F.adaptive_max_pool2d(pixel_difference, grid_size)
+    mask = pooled_difference >= difference_threshold
+    if dilation:
+        kernel_size = 2 * dilation + 1
+        mask = F.max_pool2d(
+            mask.float(),
+            kernel_size=kernel_size,
+            stride=1,
+            padding=dilation,
+        ).bool()
+    return mask.flatten(1)
+
+
 def sample_memory_bank(
     patch_batches: Iterable[torch.Tensor],
     *,
@@ -654,6 +703,55 @@ def positive_evidence_scores(
     standardized = (values - head["center"]) / head["scale"]
     logits = standardized @ head["coefficient"] + float(head["intercept"])
     return torch.relu(logits - float(head["normal_margin"]))
+
+
+def fixed_count_rank_fusion(
+    base_scores: Sequence[float],
+    patch_scores: Sequence[float],
+    *,
+    anomaly_count: int,
+    patch_weight: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fuse two score rankings and label an exact number of highest-ranked samples.
+
+    Rank fusion removes incompatible numeric scales between an open-set distance score and a
+    discriminative patch head. The returned continuous score is an ordinal percentile mixture;
+    only its ordering is meaningful. Stable sorting makes tied-score behavior reproducible.
+
+    Args:
+        base_scores: Primary anomaly scores, normally the calibrated DINO ranking signal.
+        patch_scores: Scores from the synthetic local-defect patch adapter.
+        anomaly_count: Exact number of samples to label anomalous.
+        patch_weight: Patch-rank contribution in ``[0, 1]``; zero is base only.
+
+    Returns:
+        ``(labels, fused_ranks)`` arrays in original row order.
+    """
+    base = np.asarray(base_scores, dtype=np.float64)
+    patch = np.asarray(patch_scores, dtype=np.float64)
+    if base.ndim != 1 or patch.ndim != 1 or base.shape != patch.shape:
+        raise ValueError("base_scores and patch_scores must be equal-length vectors")
+    if not len(base):
+        raise ValueError("At least one score is required")
+    if not np.isfinite(base).all() or not np.isfinite(patch).all():
+        raise ValueError("Scores must be finite")
+    if not 0 <= anomaly_count <= len(base):
+        raise ValueError("anomaly_count must be between zero and the number of scores")
+    if not 0 <= patch_weight <= 1:
+        raise ValueError("patch_weight must be between zero and one")
+
+    def percentile_ranks(values: np.ndarray) -> np.ndarray:
+        # Average ranks prevent a large zero-evidence tie from acquiring a false ordering based on
+        # CSV row position. This matters because the margin-clamped adapter legitimately emits zero
+        # for most normal-looking images.
+        return pd.Series(values).rank(method="average", pct=True).to_numpy(dtype=np.float64)
+
+    fused = (1 - patch_weight) * percentile_ranks(base) + patch_weight * percentile_ranks(patch)
+    labels = np.zeros(len(fused), dtype=np.int64)
+    if anomaly_count:
+        selected = np.argsort(fused, kind="mergesort")[-anomaly_count:]
+        labels[selected] = 1
+    return labels, fused
 
 
 def cutpaste_batch(
