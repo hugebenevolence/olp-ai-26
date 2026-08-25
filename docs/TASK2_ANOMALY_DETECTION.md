@@ -223,10 +223,11 @@ does not fine-tune DINO. Select exactly one mode near the top of the notebook:
 | `085_new_aug_no_tta` | MixUp-first, subtle CutMix, gray curve, white curve | No | Measure the new augmentation only |
 | `085_new_aug_tta` | Same new profile | Category-safe flips | Measure new augmentation plus matched TTA |
 
-Every mode has its own experiment directory and frozen bundle, and every run writes exactly one
-submission ZIP. Train all three modes with `PHASE="public"` and `RUN_TRAINING=True`; each resulting
-frozen bundle can then be loaded with `PHASE="private"` and `RUN_TRAINING=False` to infer over the
-complete private test set.
+Every mode has its own experiment directory and frozen bundle. One run trains the selected mode
+from the official training set, freezes it, evaluates all 480 public images, and then evaluates all
+960 private images. It writes separate public and private submission ZIPs. Change
+`EXPERIMENT_MODE` and rerun only when a different mode is required; bundles are never reused across
+modes.
 
 Adapter labels are generated in pixel space:
 
@@ -347,19 +348,20 @@ initial search. The current DINO three-mode notebook does not sweep: it freezes
 `SELECTED_THRESHOLD_SCALE = 0.85` so the comparison changes only augmentation and TTA. Lower scales
 predict more anomalies, but changing the scale now would break that controlled comparison.
 
-## Private final
+## End-to-end public and private run
 
-Before private data is released, ensure the frozen bundle is in durable storage. Then change:
+The DINO notebook now stages both official test phases automatically. Configure the selected mode
+and password once:
 
 ```python
-PHASE = "private"
-RUN_TRAINING = False
-EXPERIMENT_MODE = "085_new_aug_tta"  # must match the selected public run
+RUN_TRAINING = True
+EXPERIMENT_MODE = "085_new_aug_no_tta"
+PRIVATE_ZIP_PASSWORD = "qBWBRZ0CK2"
 ```
 
-The notebook rebuilds the architecture without downloading weights, restores the exact frozen
-encoders, memories, thresholds, and scales from
-`PERSISTENT_DIR / f"anomalydino_{EXPERIMENT_MODE}" / task2_<experiment>_bundle.pt`, then performs
-inference only. It
-refuses private-mode training. Validate that the final ZIP contains exactly
-`task2_private_output.csv`.
+The training and calibration cells use only `dataset_train`. After freezing the bundle, one
+inference loop evaluates public and private manifests independently and writes
+`task2_public_output.csv` and `task2_private_output.csv` into separate ZIP directories. Private
+images never enter fitting, calibration, memory construction, augmentation fitting, or threshold
+selection. Set `RUN_TRAINING=False` only to resume from the matching persisted bundle while still
+regenerating both phase outputs.

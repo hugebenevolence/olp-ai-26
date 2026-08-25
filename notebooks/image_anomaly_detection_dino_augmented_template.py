@@ -4,7 +4,7 @@
 # The preceding candidate reached 0.769 at threshold scale 0.85. This notebook freezes that scale
 # and exposes three controlled modes: the original public baseline, the private-inspection-driven
 # augmentation without TTA, and the same new augmentation with matched calibration-time TTA. Each
-# run trains or loads one isolated bundle and writes exactly one submission ZIP.
+# run trains or loads one isolated bundle and writes separate public and private submission ZIPs.
 
 # %% [markdown]
 # ## Colab bootstrap
@@ -68,11 +68,12 @@ from olp_ai_26.cv.anomaly_detection import (
 # %%
 TEAM_NAME = "replace_team_name"
 TASK_NAME = "task2"
-PHASE = "public"  # public | private
+# One run trains from the official training split, then evaluates both test phases with the same
+# frozen artifact. Set False only when resuming from an already persisted bundle.
 RUN_TRAINING = True
-# Choose exactly one. Train each mode on public first. The two new-augmentation modes can later be
-# rerun with PHASE="private" and RUN_TRAINING=False to load their frozen public bundles.
-EXPERIMENT_MODE = "085_new_aug_tta"
+# Choose exactly one mode per Colab run. Repeat the notebook for the other modes when comparison
+# ZIPs are required; every run now writes both public and private submissions automatically.
+EXPERIMENT_MODE = "085_new_aug_no_tta"
 EXPERIMENT_MODES = {
     "085_original_public": {
         "synthetic_profile": "original",
@@ -104,7 +105,7 @@ PERSISTENT_DIR = (
     if "google.colab" in sys.modules
     else None
 )
-PRIVATE_ZIP_PASSWORD = None
+PRIVATE_ZIP_PASSWORD = "qBWBRZ0CK2"
 
 MODEL_NAME = "vit_small_patch14_dinov2.lvd142m"
 MODEL_CHECKPOINT = None
@@ -144,10 +145,6 @@ PATCH_ADAPTER_NORMAL_MARGIN_QUANTILE = 0.95
 
 SEED = 42
 NUM_WORKERS = 2
-if PHASE not in {"public", "private"}:
-    raise ValueError("PHASE must be 'public' or 'private'")
-if PHASE == "private" and RUN_TRAINING:
-    raise ValueError("Private is inference-only: load the frozen public bundle")
 if AUGMENTATION_PROFILE not in {"category_policy", "blur_only"}:
     raise ValueError("AUGMENTATION_PROFILE must be 'category_policy' or 'blur_only'")
 if CLEAN_MEMORY_PATCHES < 1 or AUGMENTED_MEMORY_PATCHES < 1:
@@ -174,15 +171,18 @@ if "google.colab" in sys.modules and (
 ):
     mount_google_drive()
 paths = ColabPaths.create(persistent_dir=PERSISTENT_DIR)
-official_paths = stage_official_task2_data(
-    OFFICIAL_DATA_SOURCE,
-    paths.data_dir / "task2_extracted",
-    phase=PHASE,
-    private_password=PRIVATE_ZIP_PASSWORD,
-)
-TRAIN_ROOT = official_paths.training_root
-TEST_ROOT = official_paths.test_root
-TEST_CSV = official_paths.test_csv
+official_paths_by_phase = {
+    phase: stage_official_task2_data(
+        OFFICIAL_DATA_SOURCE,
+        paths.data_dir / "task2_extracted",
+        phase=phase,
+        private_password=PRIVATE_ZIP_PASSWORD if phase == "private" else None,
+    )
+    for phase in ("public", "private")
+}
+TRAIN_ROOT = official_paths_by_phase["public"].training_root
+if official_paths_by_phase["private"].training_root.resolve() != TRAIN_ROOT.resolve():
+    raise ValueError("Public and private staging resolved different official training roots")
 EXPERIMENT_DIR = paths.output_dir / EXPERIMENT_NAME
 BUNDLE_NAME = f"task2_{EXPERIMENT_NAME}_bundle.pt"
 BUNDLE_PATH = (
@@ -334,12 +334,7 @@ print(config_table)
 
 # %%
 train_table = load_official_training_table(TRAIN_ROOT)
-test_table = pd.read_csv(TEST_CSV)
 required_test_columns = ["sample_id", "category", "relative_path"]
-if list(test_table.columns) != required_test_columns:
-    raise ValueError(f"test.csv columns must be exactly {required_test_columns}")
-if test_table["sample_id"].duplicated().any():
-    raise ValueError("test.csv contains duplicate sample_id values")
 expected_train_counts = {
     "category_01": 664,
     "category_02": 664,
@@ -351,12 +346,20 @@ expected_train_counts = {
 actual_train_counts = train_table["category"].value_counts().sort_index().to_dict()
 if actual_train_counts != expected_train_counts:
     raise ValueError(f"Unexpected training counts: {actual_train_counts}")
-expected_test_count = 80 if PHASE == "public" else 160
-actual_test_counts = test_table["category"].value_counts().sort_index().to_dict()
-if actual_test_counts != {category: expected_test_count for category in CATEGORIES}:
-    raise ValueError(f"Unexpected {PHASE} counts: {actual_test_counts}")
+test_tables = {}
+for phase, expected_test_count in {"public": 80, "private": 160}.items():
+    phase_table = pd.read_csv(official_paths_by_phase[phase].test_csv).reset_index(drop=True)
+    if list(phase_table.columns) != required_test_columns:
+        raise ValueError(f"{phase} test.csv columns must be exactly {required_test_columns}")
+    if phase_table["sample_id"].duplicated().any():
+        raise ValueError(f"{phase} test.csv contains duplicate sample_id values")
+    actual_test_counts = phase_table["category"].value_counts().sort_index().to_dict()
+    if actual_test_counts != {category: expected_test_count for category in CATEGORIES}:
+        raise ValueError(f"Unexpected {phase} counts: {actual_test_counts}")
+    test_tables[phase] = phase_table
 print("Train counts:\n", train_table["category"].value_counts().sort_index())
-print("Test counts:\n", test_table["category"].value_counts().sort_index())
+for phase, phase_table in test_tables.items():
+    print(f"{phase.title()} test counts:\n", phase_table["category"].value_counts().sort_index())
 
 # %% [markdown]
 # ## 3. Plot and persist every configured augmentation before feature extraction
@@ -1229,80 +1232,106 @@ else:
 # %% [markdown]
 # ## 6. Public/private inference and score audit
 
-# %%
-all_dino_scores = np.zeros(len(test_table), dtype=np.float64)
-all_positive_evidence = np.zeros(len(test_table), dtype=np.float64)
-all_patch_adapter_scores = np.zeros(len(test_table), dtype=np.float64)
-all_scores = np.zeros(len(test_table), dtype=np.float64)
-all_labels = np.zeros(len(test_table), dtype=np.int64)
-all_degree_scores = {
-    degree: np.zeros(len(test_table), dtype=np.float64) for degree in NEIGHBORHOOD_DEGREES
-}
-for category, category_rows in test_table.groupby("category", sort=True):
-    artifact = category_artifacts[category]
-    expected_tta_methods = CATEGORY_TTA[category] if ENABLE_TTA else ("identity",)
-    artifact_tta_methods = tuple(artifact["tta_methods"])
-    if artifact_tta_methods != expected_tta_methods:
-        raise ValueError(
-            f"{category} bundle TTA methods {artifact_tta_methods} do not match "
-            f"selected mode {expected_tta_methods}"
-        )
-    view_scores = score_frame_views(
-        category_rows,
-        TEST_ROOT,
-        extractor,
-        artifact["clean_memories"],
-        artifact["augmented_memories"],
-        artifact,
-        tta_methods=artifact_tta_methods,
-    )
-    row_dino_scores = np.asarray(view_scores["dino"])
-    row_evidence = np.asarray(view_scores["evidence"])
-    row_patch_adapter_scores = np.asarray(view_scores["patch"])
-    row_scores = np.asarray(view_scores["combined"])
-    row_degree_scores = view_scores["degree"]
-    threshold = artifact["calibration"]["selected_threshold"] * SELECTED_THRESHOLD_SCALE
-    positions = category_rows.index.to_numpy()
-    all_dino_scores[positions] = row_dino_scores
-    all_positive_evidence[positions] = row_evidence
-    all_patch_adapter_scores[positions] = row_patch_adapter_scores
-    all_scores[positions] = row_scores
-    all_labels[positions] = (row_scores >= threshold).astype(np.int64)
-    for degree, degree_scores in row_degree_scores.items():
-        all_degree_scores[degree][positions] = degree_scores
-    print(
-        category,
-        {
-            "threshold": threshold,
-            "threshold_scale": SELECTED_THRESHOLD_SCALE,
-            "tta_methods": artifact_tta_methods,
-            "degree_score_medians": {
-                degree: float(np.median(values)) for degree, values in row_degree_scores.items()
-            },
-            "dino_score_median": float(np.median(row_dino_scores)),
-            "positive_evidence_images": int((row_evidence > 0).sum()),
-            "positive_evidence_max": float(row_evidence.max()),
-            "patch_adapter_score_median": float(np.median(row_patch_adapter_scores)),
-            "patch_adapter_score_max": float(row_patch_adapter_scores.max()),
-            "combined_patch_spearman": float(
-                pd.Series(row_scores).corr(pd.Series(row_patch_adapter_scores), method="spearman")
-            ),
-            "combined_score_median": float(np.median(row_scores)),
-            "predicted_anomalies": int((row_scores >= threshold).sum()),
-        },
-    )
+# The same frozen category artifacts are applied first to all 480 public images and then to all 960
+# private images. No fitting, threshold selection, or memory construction occurs inside this loop.
 
-audit = test_table.copy()
-for degree, degree_scores in all_degree_scores.items():
-    audit[f"dino_degree_{degree}_score"] = degree_scores
-audit["dino_score"] = all_dino_scores
-audit["positive_evidence"] = all_positive_evidence
-audit["patch_adapter_score"] = all_patch_adapter_scores
-audit["combined_score"] = all_scores
-audit["experiment_mode"] = EXPERIMENT_MODE
-audit["synthetic_profile"] = SYNTHETIC_PROFILE
-audit["tta_enabled"] = ENABLE_TTA
-audit["label"] = all_labels
+
+# %%
+def infer_test_phase(
+    phase: str,
+    test_table: pd.DataFrame,
+    test_root: Path,
+) -> tuple[pd.DataFrame, np.ndarray]:
+    """Infer one complete test phase using only the frozen public-training artifacts.
+
+    Args:
+        phase: Human-readable phase label used in progress logs.
+        test_table: Validated official public or private test manifest.
+        test_root: Directory containing the phase's image files.
+
+    Returns:
+        The detailed score audit and the binary labels in official manifest order.
+    """
+    all_dino_scores = np.zeros(len(test_table), dtype=np.float64)
+    all_positive_evidence = np.zeros(len(test_table), dtype=np.float64)
+    all_patch_adapter_scores = np.zeros(len(test_table), dtype=np.float64)
+    all_scores = np.zeros(len(test_table), dtype=np.float64)
+    all_labels = np.zeros(len(test_table), dtype=np.int64)
+    all_degree_scores = {
+        degree: np.zeros(len(test_table), dtype=np.float64) for degree in NEIGHBORHOOD_DEGREES
+    }
+    print(f"Starting frozen {phase} inference over {len(test_table)} images")
+    for category, category_rows in test_table.groupby("category", sort=True):
+        artifact = category_artifacts[category]
+        expected_tta_methods = CATEGORY_TTA[category] if ENABLE_TTA else ("identity",)
+        artifact_tta_methods = tuple(artifact["tta_methods"])
+        if artifact_tta_methods != expected_tta_methods:
+            raise ValueError(
+                f"{category} bundle TTA methods {artifact_tta_methods} do not match "
+                f"selected mode {expected_tta_methods}"
+            )
+        view_scores = score_frame_views(
+            category_rows,
+            test_root,
+            extractor,
+            artifact["clean_memories"],
+            artifact["augmented_memories"],
+            artifact,
+            tta_methods=artifact_tta_methods,
+        )
+        row_dino_scores = np.asarray(view_scores["dino"])
+        row_evidence = np.asarray(view_scores["evidence"])
+        row_patch_adapter_scores = np.asarray(view_scores["patch"])
+        row_scores = np.asarray(view_scores["combined"])
+        row_degree_scores = view_scores["degree"]
+        threshold = artifact["calibration"]["selected_threshold"] * SELECTED_THRESHOLD_SCALE
+        positions = category_rows.index.to_numpy()
+        all_dino_scores[positions] = row_dino_scores
+        all_positive_evidence[positions] = row_evidence
+        all_patch_adapter_scores[positions] = row_patch_adapter_scores
+        all_scores[positions] = row_scores
+        all_labels[positions] = (row_scores >= threshold).astype(np.int64)
+        for degree, degree_scores in row_degree_scores.items():
+            all_degree_scores[degree][positions] = degree_scores
+        print(
+            phase,
+            category,
+            {
+                "threshold": threshold,
+                "threshold_scale": SELECTED_THRESHOLD_SCALE,
+                "tta_methods": artifact_tta_methods,
+                "degree_score_medians": {
+                    degree: float(np.median(values)) for degree, values in row_degree_scores.items()
+                },
+                "dino_score_median": float(np.median(row_dino_scores)),
+                "positive_evidence_images": int((row_evidence > 0).sum()),
+                "positive_evidence_max": float(row_evidence.max()),
+                "patch_adapter_score_median": float(np.median(row_patch_adapter_scores)),
+                "patch_adapter_score_max": float(row_patch_adapter_scores.max()),
+                "combined_patch_spearman": float(
+                    pd.Series(row_scores).corr(
+                        pd.Series(row_patch_adapter_scores), method="spearman"
+                    )
+                ),
+                "combined_score_median": float(np.median(row_scores)),
+                "predicted_anomalies": int((row_scores >= threshold).sum()),
+            },
+        )
+
+    audit = test_table.copy()
+    for degree, degree_scores in all_degree_scores.items():
+        audit[f"dino_degree_{degree}_score"] = degree_scores
+    audit["dino_score"] = all_dino_scores
+    audit["positive_evidence"] = all_positive_evidence
+    audit["patch_adapter_score"] = all_patch_adapter_scores
+    audit["combined_score"] = all_scores
+    audit["experiment_mode"] = EXPERIMENT_MODE
+    audit["synthetic_profile"] = SYNTHETIC_PROFILE
+    audit["tta_enabled"] = ENABLE_TTA
+    audit["phase"] = phase
+    audit["label"] = all_labels
+    return audit, all_labels
+
 
 # %% [markdown]
 # ## 7. Exact submission writer
@@ -1311,19 +1340,23 @@ audit["label"] = all_labels
 
 
 def write_submission_candidate(
+    phase: str,
+    test_table: pd.DataFrame,
     labels: np.ndarray,
     tag: str = "main",
 ) -> tuple[pd.DataFrame, Path]:
-    """Write one isolated candidate with the exact official CSV and ZIP structure."""
-    candidate_dir = EXPERIMENT_DIR / f"candidate_{tag}"
+    """Write one phase-isolated candidate with the exact official CSV and ZIP structure."""
+    if phase not in {"public", "private"}:
+        raise ValueError("phase must be 'public' or 'private'")
+    candidate_dir = EXPERIMENT_DIR / f"candidate_{tag}_{phase}"
     candidate_dir.mkdir(parents=True, exist_ok=True)
     submission = test_table[["sample_id", "category"]].copy()
     submission["label"] = np.asarray(labels, dtype=np.int64)
     validate_anomaly_submission(submission, test_table)
-    csv_name = f"{TASK_NAME}_{PHASE}_output.csv"
+    csv_name = f"{TASK_NAME}_{phase}_output.csv"
     csv_path = candidate_dir / csv_name
     submission.to_csv(csv_path, index=False, encoding="utf-8")
-    zip_suffix = "pub" if PHASE == "public" else "pri"
+    zip_suffix = "pub" if phase == "public" else "pri"
     zip_path = candidate_dir / f"{TEAM_NAME}_{TASK_NAME}_{zip_suffix}.zip"
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.write(csv_path, arcname=csv_name)
@@ -1333,53 +1366,71 @@ def write_submission_candidate(
     return submission, zip_path
 
 
-submission, submission_zip_path = write_submission_candidate(
-    all_labels,
-    tag=EXPERIMENT_MODE,
-)
-audit.to_csv(EXPERIMENT_DIR / f"{TASK_NAME}_{PHASE}_scores.csv", index=False)
+phase_outputs = {}
+summary_rows = []
+for phase in ("public", "private"):
+    phase_table = test_tables[phase]
+    audit, labels = infer_test_phase(
+        phase,
+        phase_table,
+        official_paths_by_phase[phase].test_root,
+    )
+    submission, submission_zip_path = write_submission_candidate(
+        phase,
+        phase_table,
+        labels,
+        tag=EXPERIMENT_MODE,
+    )
+    audit_path = EXPERIMENT_DIR / f"{TASK_NAME}_{phase}_scores.csv"
+    audit.to_csv(audit_path, index=False)
+    phase_outputs[phase] = {
+        "audit": audit,
+        "submission": submission,
+        "submission_zip": submission_zip_path,
+    }
+    summary_rows.append(
+        {
+            "experiment_mode": EXPERIMENT_MODE,
+            "phase": phase,
+            "images": len(phase_table),
+            "synthetic_profile": SYNTHETIC_PROFILE,
+            "threshold_scale": SELECTED_THRESHOLD_SCALE,
+            "tta": ENABLE_TTA,
+            "predicted_anomalies": int(submission["label"].sum()),
+            "submission_zip": str(submission_zip_path),
+        }
+    )
+    print(
+        submission_zip_path,
+        "phase=",
+        phase,
+        "mode=",
+        EXPERIMENT_MODE,
+        "tta=",
+        ENABLE_TTA,
+        "total=",
+        int(submission["label"].sum()),
+        "by_category=",
+        submission.groupby("category")["label"].sum().to_dict(),
+    )
+
 sync_artifacts(
     paths.output_dir,
     paths.persistent_dir,
     patterns=("*.pt", "*.json", "*.csv", "*.zip"),
 )
-print(
-    submission_zip_path,
-    "mode=",
-    EXPERIMENT_MODE,
-    "synthetic_profile=",
-    SYNTHETIC_PROFILE,
-    "threshold_scale=",
-    SELECTED_THRESHOLD_SCALE,
-    "tta=",
-    ENABLE_TTA,
-    "total=",
-    int(submission["label"].sum()),
-    "by_category=",
-    submission.groupby("category")["label"].sum().to_dict(),
-)
-submission.head()
+phase_outputs["private"]["submission"].head()
 
 # %% [markdown]
 # ## 8. Mode interpretation
 #
-# Each run produces one ZIP. Compare the three modes as separate Colab runs; do not reuse a bundle
-# across modes. The TTA mode averages identity/horizontal/vertical views only for categories 03 and
-# 05, and its threshold was calibrated with those same views. All modes use threshold scale 0.85.
+# Each selected-mode run produces separate public and private ZIPs from one frozen training bundle.
+# Compare the three modes as separate Colab runs; do not reuse a bundle across modes. The TTA mode
+# averages identity/horizontal/vertical views only for categories 03 and 05, and its threshold was
+# calibrated with those same views. All modes use threshold scale 0.85.
 
 # %%
-candidate_summary = pd.DataFrame(
-    [
-        {
-            "experiment_mode": EXPERIMENT_MODE,
-            "phase": PHASE,
-            "synthetic_profile": SYNTHETIC_PROFILE,
-            "threshold_scale": SELECTED_THRESHOLD_SCALE,
-            "tta": ENABLE_TTA,
-            "predicted_anomalies": int(all_labels.sum()),
-            "submission_zip": str(submission_zip_path),
-        }
-    ]
-).set_index("experiment_mode")
-print("Completed one isolated mode; change EXPERIMENT_MODE and rerun for the next candidate.")
+candidate_summary = pd.DataFrame(summary_rows).set_index(["experiment_mode", "phase"])
+print("Completed training plus public and private inference for one isolated mode.")
+print("Change EXPERIMENT_MODE and rerun only when another mode is required.")
 print(candidate_summary)
