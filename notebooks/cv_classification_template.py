@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path("/content/olp-ai-26") if "google.colab" in sys.modules else Path.cwd()
+REQUIRED_MODULES = ("timm",)
 exec((PROJECT_ROOT / "notebooks" / "_colab_bootstrap.py").read_text(encoding="utf-8"))
 
 # %%
@@ -31,6 +32,7 @@ from olp_ai_26.core.config import CompetitionConfig, TimeBudget, TrainerConfig
 from olp_ai_26.core.inference import predict_logits
 from olp_ai_26.core.inspect import dataset_report
 from olp_ai_26.core.metrics import evaluate_metric
+from olp_ai_26.core.report import record_run
 from olp_ai_26.core.split import make_split
 from olp_ai_26.core.submission import build_submission, write_submission
 from olp_ai_26.core.trainer import Trainer
@@ -53,7 +55,10 @@ PERSISTENT_DIR = None  # or Path("/content/drive/MyDrive/olpai26/cv")
 if DRIVE_DATA_ARCHIVE or PERSISTENT_DIR:
     mount_google_drive()
 paths = ColabPaths.create(persistent_dir=PERSISTENT_DIR)
+paths.output_dir = paths.output_dir / "cv_classification"
+paths.output_dir.mkdir(parents=True, exist_ok=True)
 DATA_DIR = paths.data_dir
+GROUP_COLUMN, TIME_COLUMN = None, None
 if DRIVE_DATA_ARCHIVE:
     stage_data(DRIVE_DATA_ARCHIVE, DATA_DIR)
 TRAIN_CSV = DATA_DIR / "train.csv"
@@ -65,7 +70,8 @@ ID_COLUMN = "id"
 MODEL_NAME = "resnet18"
 IMAGE_SIZE = 224
 BATCH_SIZE = 32
-TTA_NAMES = ("identity", "hflip")  # use ("identity",) to disable
+MODEL_CHECKPOINT = None
+TTA_NAMES = ("identity",)  # use ("identity",) to disable
 
 competition = CompetitionConfig(
     data_dir=DATA_DIR,
@@ -86,9 +92,9 @@ print(list_supported_classifiers("*resnet*", pretrained=False)[:30])
 # %%
 report = dataset_report(DATA_DIR, image_limit=500)
 print(report["counts"])
-train = pd.read_csv(TRAIN_CSV)
-test = pd.read_csv(TEST_CSV)
-sample = pd.read_csv(SAMPLE_CSV)
+train = pd.read_csv(TRAIN_CSV, converters={ID_COLUMN: str})
+test = pd.read_csv(TEST_CSV, converters={ID_COLUMN: str})
+sample = pd.read_csv(SAMPLE_CSV, converters={ID_COLUMN: str})
 print(train.head())
 print(train[TARGET_COLUMN].value_counts(dropna=False))
 
@@ -96,7 +102,14 @@ print(train[TARGET_COLUMN].value_counts(dropna=False))
 # ## 2. Leakage-aware split and loaders
 
 # %%
-split = make_split(train, target_columns=TARGET_COLUMN, valid_size=0.2, seed=competition.seed)
+split = make_split(
+    train,
+    target_columns=TARGET_COLUMN,
+    group_column=GROUP_COLUMN,
+    time_column=TIME_COLUMN,
+    valid_size=0.2,
+    seed=competition.seed,
+)
 label_to_index, index_to_label = label_mapping(train[TARGET_COLUMN])
 train_ds = ImageTableDataset(
     split.train,
@@ -126,6 +139,7 @@ model = build_image_classifier(
     MODEL_NAME,
     len(label_to_index),
     pretrained_allowed=competition.pretrained_allowed,
+    checkpoint_path=MODEL_CHECKPOINT,
 )
 trainer = Trainer(
     model,
@@ -139,6 +153,15 @@ trainer = Trainer(
 )
 history = trainer.fit(train_loader, valid_loader)
 print(history[-1])
+valid_logits = predict_logits(
+    model, valid_loader, device=competition.device, transforms=build_classification_tta(TTA_NAMES)
+)
+score = evaluate_metric(
+    training.metric_name,
+    split.valid[TARGET_COLUMN].map(label_to_index),
+    valid_logits.argmax(axis=1),
+)
+print({"submission_path_validation": score})
 
 # %% [markdown]
 # ## 4. Test inference and validated submission
@@ -158,9 +181,27 @@ logits = predict_logits(
     transforms=build_classification_tta(TTA_NAMES),
 )
 labels = [index_to_label[index] for index in logits.argmax(axis=1)]
-submission = build_submission(sample, {TARGET_COLUMN: labels})
+submission = build_submission(
+    sample, {TARGET_COLUMN: labels}, prediction_ids=test[[ID_COLUMN]], id_columns=ID_COLUMN
+)
 write_submission(
     submission, competition.output_dir / "submission.csv", sample=sample, id_columns=ID_COLUMN
+)
+record_run(
+    competition.output_dir,
+    task="cv_classification",
+    model=MODEL_NAME,
+    configuration={"competition": competition.to_dict(), "training": training},
+    validation_metrics={training.metric_name: score},
+    split=split,
+    data_summary={"train_rows": len(train), "test_rows": len(test)},
+    inference_options={
+        "label_values": [index_to_label[i] for i in range(len(index_to_label))],
+        "image_size": IMAGE_SIZE,
+        "id_column": ID_COLUMN,
+        "tta_names": TTA_NAMES,
+    },
+    checkpoint=str(trainer.checkpoint_path),
 )
 sync_artifacts(paths.output_dir, paths.persistent_dir)
 submission.head()

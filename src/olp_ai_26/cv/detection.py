@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,10 @@ from PIL import Image
 from torch import nn
 from torch.utils.data import Dataset
 from torchvision.transforms import functional as TF
+
+from olp_ai_26.core.config import TimeBudget
+from olp_ai_26.cv.segmentation import mask_to_rle
+from olp_ai_26.cv.weights import local_checkpoint
 
 DETECTION_ARCHITECTURES = (
     "fasterrcnn_resnet50_fpn_v2",
@@ -60,6 +65,8 @@ class BoxDetectionDataset(Dataset[tuple[torch.Tensor, dict[str, torch.Tensor]]])
         labels = torch.as_tensor(rows[self.label_column].to_numpy(), dtype=torch.int64)
         if (labels < 1).any():
             raise ValueError("Torchvision foreground detection labels must start at 1")
+        if not torch.isfinite(boxes).all() or (boxes[:, 2:] <= boxes[:, :2]).any():
+            raise ValueError("Boxes must be finite exclusive xyxy rectangles with positive area")
         target = {
             "boxes": boxes,
             "labels": labels,
@@ -75,11 +82,32 @@ def detection_collate(batch: list[tuple[Any, Any]]) -> tuple[tuple[Any, ...], tu
     return tuple(zip(*batch, strict=True))
 
 
+class DetectionInferenceDataset(Dataset[Any]):
+    """Read an ordered image manifest without resizing or normalizing detector inputs."""
+
+    def __init__(
+        self, frame: pd.DataFrame, *, image_column: str = "image", root: Path | str = "."
+    ) -> None:
+        self.frame = frame.reset_index(drop=True)
+        self.image_column = image_column
+        self.root = Path(root)
+
+    def __len__(self) -> int:
+        """Return the number of inference images."""
+        return len(self.frame)
+
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Return an RGB tensor and empty target for the variable-size detection collator."""
+        with Image.open(self.root / str(self.frame.iloc[index][self.image_column])) as image:
+            return TF.pil_to_tensor(image.convert("RGB")).float() / 255, {}
+
+
 def build_detection_model(
     num_classes: int,
     *,
     architecture: str = "fasterrcnn_resnet50_fpn_v2",
     pretrained_allowed: bool = False,
+    checkpoint_path: Path | str | None = None,
 ) -> nn.Module:
     """Build a torchvision box detector and replace its classification head.
 
@@ -87,7 +115,9 @@ def build_detection_model(
         num_classes: Total number of labels including background class 0.
         architecture: ``fasterrcnn_resnet50_fpn_v2``, ``fasterrcnn_resnet50_fpn``, or
             ``fasterrcnn_mobilenet_v3_large_fpn``.
-        pretrained_allowed: Download default COCO weights only when competition rules permit it.
+        pretrained_allowed: Require explicitly staged permitted weights when enabled.
+        checkpoint_path: Original permitted COCO state for initialization; matching task state
+            for reload.
     """
     from torchvision.models.detection import (
         fasterrcnn_mobilenet_v3_large_fpn,
@@ -107,12 +137,14 @@ def build_detection_model(
         raise ValueError(
             f"Unknown detector {architecture!r}; choose {sorted(factories)}"
         ) from error
-    model = factory(
-        weights="DEFAULT" if pretrained_allowed else None,
-        weights_backbone="DEFAULT" if pretrained_allowed else None,
-    )
+    checkpoint = local_checkpoint(pretrained_allowed, checkpoint_path)
+    model = factory(weights=None, weights_backbone=None)
+    if checkpoint and pretrained_allowed:
+        model.load_state_dict(torch.load(checkpoint, map_location="cpu", weights_only=True))
     features = model.roi_heads.box_predictor.cls_score.in_features
     model.roi_heads.box_predictor = FastRCNNPredictor(features, num_classes)
+    if checkpoint and not pretrained_allowed:
+        model.load_state_dict(torch.load(checkpoint, map_location="cpu", weights_only=True))
     return model
 
 
@@ -121,7 +153,8 @@ def train_detection_epoch(
     loader: Any,
     optimizer: torch.optim.Optimizer,
     *,
-    device: str = "cuda",
+    device: str = "auto",
+    time_budget: TimeBudget | None = None,
 ) -> float:
     """Train one epoch using the loss dictionary returned by torchvision detectors."""
     resolved = torch.device(
@@ -131,6 +164,8 @@ def train_detection_epoch(
     total = 0.0
     batches = 0
     for images, targets in loader:
+        if time_budget and time_budget.should_stop:
+            break
         images = [image.to(resolved) for image in images]
         targets = [{key: value.to(resolved) for key, value in target.items()} for target in targets]
         losses = model(images, targets)
@@ -141,6 +176,51 @@ def train_detection_epoch(
         total += float(loss.detach())
         batches += 1
     return total / max(batches, 1)
+
+
+@torch.inference_mode()
+def predict_detections(
+    model: nn.Module, loader: Any, *, device: str = "cpu"
+) -> list[dict[str, torch.Tensor]]:
+    """Return CPU detection dictionaries in the manifest/dataset order, fitting nothing."""
+    model.to(device).eval()
+    outputs = []
+    for images, _ in loader:
+        outputs.extend(
+            {key: value.cpu() for key, value in prediction.items()}
+            for prediction in model([image.to(device) for image in images])
+        )
+    return outputs
+
+
+def serialize_detections(
+    predictions: list[dict[str, torch.Tensor]],
+    *,
+    score_threshold: float = 0.0,
+    mask_threshold: float = 0.5,
+) -> list[str]:
+    """Serialize one JSON list per image, optionally with original-size column-major mask RLE.
+
+    This is the documented practice CSV contract; adapt serialization to the official sample.
+    """
+    rows = []
+    for prediction in predictions:
+        instances = []
+        for index, score in enumerate(prediction["scores"]):
+            if float(score) < score_threshold:
+                continue
+            instance = {
+                "label": int(prediction["labels"][index]),
+                "score": float(score),
+                "box": prediction["boxes"][index].tolist(),
+            }
+            if "masks" in prediction:
+                mask = prediction["masks"][index, 0] >= mask_threshold
+                instance["rle"] = mask_to_rle(mask.numpy())
+                instance["shape"] = list(mask.shape)
+            instances.append(instance)
+        rows.append(json.dumps(instances, allow_nan=False))
+    return rows
 
 
 def validate_yolo_data_config(path: Path | str) -> dict[str, Any]:

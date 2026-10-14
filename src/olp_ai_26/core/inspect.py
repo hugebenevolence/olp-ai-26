@@ -71,19 +71,33 @@ def discover_files(root: Path | str) -> dict[str, list[Path]]:
     return result
 
 
-def load_table(path: Path | str) -> pd.DataFrame:
-    """Load a CSV, TSV, JSON/JSONL, or Parquet table based on its extension."""
+def load_table(
+    path: Path | str, *, id_columns: Iterable[str] = (), empty_text_columns: Iterable[str] = ()
+) -> pd.DataFrame:
+    """Load a table, optionally preserving literal CSV IDs and task-permitted empty text cells."""
     path = Path(path)
     suffix = path.suffix.lower()
+    ids, text = list(id_columns), list(empty_text_columns)
+    converters = {column: str for column in [*ids, *text]}
     if suffix == ".csv":
-        return pd.read_csv(path)
+        return pd.read_csv(path, converters=converters)
     if suffix == ".tsv":
-        return pd.read_csv(path, sep="\t")
+        return pd.read_csv(path, sep="\t", converters=converters)
     if suffix == ".parquet":
-        return pd.read_parquet(path)
-    if suffix in {".json", ".jsonl"}:
-        return pd.read_json(path, lines=suffix == ".jsonl")
-    raise ValueError(f"Unsupported table format: {path.suffix}")
+        frame = pd.read_parquet(path)
+    elif suffix in {".json", ".jsonl"}:
+        frame = pd.read_json(path, lines=suffix == ".jsonl")
+    else:
+        raise ValueError(f"Unsupported table format: {path.suffix}")
+    for column in ids:
+        if column in frame:
+            frame[column] = frame[column].map(
+                lambda value: str(value) if pd.notna(value) else value
+            )
+    for column in text:
+        if column in frame:
+            frame[column] = frame[column].fillna("")
+    return frame
 
 
 def profile_table(frame: pd.DataFrame) -> TableProfile:

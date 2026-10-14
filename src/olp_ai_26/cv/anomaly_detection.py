@@ -25,6 +25,8 @@ from torch.nn import functional as F
 from torch.utils.data import Dataset
 from torchvision.transforms import v2
 
+from olp_ai_26.cv.weights import timm_weight_options
+
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 
 NORMAL_AUGMENTATIONS = (
@@ -311,20 +313,19 @@ class TimmPatchFeatureExtractor(nn.Module):
         *,
         out_indices: tuple[int, ...] = (2, 3),
         projection_dim: int = 128,
-        pretrained_allowed: bool = True,
+        pretrained_allowed: bool = False,
         checkpoint_path: Path | str | None = None,
         seed: int = 42,
     ) -> None:
         """Build the frozen encoder and deterministic Gaussian random projection.
 
-        ``pretrained_allowed=True`` may download timm weights. Pass a staged local checkpoint to
+        ``pretrained_allowed=True`` requires a staged local checkpoint to
         avoid network dependence and to make the exact permitted weights reproducible.
         """
         super().__init__()
         self.encoder = timm.create_model(
             model_name,
-            pretrained=pretrained_allowed and checkpoint_path is None,
-            checkpoint_path=str(checkpoint_path or ""),
+            **timm_weight_options(pretrained_allowed, checkpoint_path),
             features_only=True,
             out_indices=out_indices,
         )
@@ -366,7 +367,7 @@ class DinoV2PatchFeatureExtractor(nn.Module):
         model_name: str = "vit_small_patch14_dinov2.lvd142m",
         *,
         image_size: int = 448,
-        pretrained_allowed: bool = True,
+        pretrained_allowed: bool = False,
         checkpoint_path: Path | str | None = None,
     ) -> None:
         """Build a frozen timm DINOv2 encoder with reproducible ImageNet normalization.
@@ -374,7 +375,7 @@ class DinoV2PatchFeatureExtractor(nn.Module):
         Args:
             model_name: A timm DINOv2 model identifier.
             image_size: Square input resolution. It must be a multiple of DINOv2's patch size 14.
-            pretrained_allowed: Whether timm may download the permitted pretrained weights.
+            pretrained_allowed: Whether explicitly staged pretrained weights are permitted.
             checkpoint_path: Optional staged local checkpoint used instead of a network download.
         """
         super().__init__()
@@ -382,8 +383,7 @@ class DinoV2PatchFeatureExtractor(nn.Module):
             raise ValueError("DINOv2 image_size must be a positive multiple of 14")
         self.encoder = timm.create_model(
             model_name,
-            pretrained=pretrained_allowed and checkpoint_path is None,
-            checkpoint_path=str(checkpoint_path or ""),
+            **timm_weight_options(pretrained_allowed, checkpoint_path),
             num_classes=0,
             img_size=image_size,
         )

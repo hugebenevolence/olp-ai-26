@@ -6,6 +6,8 @@ import html
 import re
 import unicodedata
 
+import pandas as pd
+
 _URL = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
 _SPACE = re.compile(r"\s+")
 
@@ -17,6 +19,8 @@ def normalize_text(
     replace_urls: bool = False,
 ) -> str:
     """Conservative Unicode cleaning that preserves Vietnamese diacritics."""
+    if value is None or (pd.api.types.is_scalar(value) and pd.isna(value)):
+        return ""
     text = unicodedata.normalize("NFC", html.unescape(str(value)))
     if replace_urls:
         text = _URL.sub("<URL>", text)

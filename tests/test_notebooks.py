@@ -3,7 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pandas as pd
+import pytest
+
 from olp_ai_26.notebooks import percent_script_to_notebook
+from olp_ai_26.practice import create_practice_pack
 
 
 def test_percent_script_export(tmp_path):
@@ -31,6 +35,7 @@ def test_generated_colab_notebooks_are_valid_and_compilable():
         "object_detection_template.ipynb",
         "retrieval_template.ipynb",
         "semantic_segmentation_template.ipynb",
+        "tabular_template.ipynb",
         "seq2seq_template.ipynb",
         "token_classification_template.ipynb",
         "transformer_text_classification_template.ipynb",
@@ -51,3 +56,42 @@ def test_generated_colab_notebooks_are_valid_and_compilable():
         for index, cell in enumerate(payload["cells"]):
             if cell["cell_type"] == "code":
                 compile("".join(cell["source"]), f"{path.name}:cell-{index}", "exec")
+
+
+def test_generated_cells_match_canonical_sources(tmp_path):
+    directory = Path(__file__).parents[1] / "notebooks"
+    for source in directory.glob("*_template.py"):
+        generated = percent_script_to_notebook(source, tmp_path / source.with_suffix(".ipynb").name)
+        expected = json.loads(generated.read_text(encoding="utf-8"))
+        actual = json.loads(source.with_suffix(".ipynb").read_text(encoding="utf-8"))
+        assert actual == expected, f"Regenerate {source.name}; generated artifact has drifted"
+
+
+@pytest.mark.parametrize("task,notebook", [("text", "nlp_classification"), ("tabular", "tabular")])
+def test_cpu_notebooks_execute_through_delivery(tmp_path, monkeypatch, task, notebook):
+    repository = Path(__file__).parents[1]
+    pack = create_practice_pack(tmp_path / "pack", task=task)
+    source = (repository / "notebooks" / f"{notebook}_template.py").read_text(encoding="utf-8")
+    source = source.replace(
+        'PROJECT_ROOT = Path("/content/olp-ai-26") '
+        'if "google.colab" in sys.modules else Path.cwd()',
+        f"PROJECT_ROOT = Path({str(repository)!r})",
+    )
+    source = source.replace("DATA_DIR = paths.data_dir", f"DATA_DIR = Path({str(pack / 'data')!r})")
+    monkeypatch.chdir(tmp_path)
+    namespace = {"__name__": "__main__"}
+    exec(compile(source, f"{notebook}:full-cpu-practice", "exec"), namespace)
+    submission = namespace["submission"]
+    expected = pd.read_csv(pack / "grading/answers.csv").set_index("id")["label"]
+    truth = expected.reindex(submission["id"]).to_numpy()
+    assert (truth == submission["label"].to_numpy()).mean() >= 0.8
+    output = (
+        tmp_path
+        / "olp_runtime"
+        / "outputs"
+        / ("nlp_classification" if task == "text" else "tabular")
+    )
+    assert (output / "pipeline.pkl").is_file()
+    assert (output / "submission.csv").is_file()
+    assert (output / "run.json").is_file()
+    assert (output / "technical_report.md").is_file()

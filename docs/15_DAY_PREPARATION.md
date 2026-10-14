@@ -1,5 +1,8 @@
 # 15-day practical preparation for OlpAI'26
 
+[Guide index](README.md) · [First practical session](PRACTICE_QUICKSTART.md) ·
+[Current implementation status](IMPLEMENTATION_STATUS.md)
+
 Prepared 14 October 2026 for a fastai Practical Deep Learning learner, **3–4 focused hours a day**,
 preparing personally first and then distributing working solutions to a team.
 
@@ -9,8 +12,9 @@ Fifteen days can materially improve competition execution. It cannot guarantee a
 of every task family. The largest immediate gains should come from trustworthy validation,
 debugging, economical experiments, and dependable submission workflows.
 
-Read the [repository audit](READINESS_AUDIT_2026-10-14.md) before trusting a template's title.
-This document is a training plan, not a claim that its exercises or repository repairs are complete.
+Read the [current implementation status](IMPLEMENTATION_STATUS.md) and
+[historical audit](READINESS_AUDIT_2026-10-14.md) before trusting a template's title.
+This document is a training plan; implemented repairs do not imply its exercises are complete.
 
 ## Contest facts that shape the plan
 

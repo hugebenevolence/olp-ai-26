@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import random
 import time
@@ -11,6 +10,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
+
+from olp_ai_26.core.artifacts import save_json
 
 
 def resolve_device(requested: str = "auto") -> str:
@@ -84,8 +85,7 @@ class CompetitionConfig:
         """Write the configuration to JSON and return the destination path."""
         destination = Path(path) if path else self.output_dir / "config.json"
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
-        return destination
+        return save_json(self.to_dict(), destination)
 
 
 @dataclass(slots=True)

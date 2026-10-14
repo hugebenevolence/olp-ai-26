@@ -53,3 +53,44 @@ def decode_generated(tokenizer: Any, token_ids: Any) -> list[str]:
     return tokenizer.batch_decode(
         token_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True
     )
+
+
+def generate_texts(
+    model: Any,
+    tokenizer: Any,
+    sources: list[str],
+    *,
+    device: str,
+    source_prefix: str = "",
+    max_source_length: int = 256,
+    max_target_length: int = 128,
+    num_beams: int = 1,
+    batch_size: int = 8,
+) -> list[str]:
+    """Generate unlabeled text directly, avoiding trainer forward passes that require labels.
+
+    Match validation's prefix, truncation, beam count, and total target-length limit exactly.
+    """
+    import torch
+
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+    model.to(device).eval()
+    result = []
+    with torch.inference_mode():
+        for start in range(0, len(sources), batch_size):
+            encoded = tokenizer(
+                [source_prefix + str(source) for source in sources[start : start + batch_size]],
+                truncation=True,
+                padding=True,
+                max_length=max_source_length,
+                return_tensors="pt",
+            )
+            generated = model.generate(
+                **{key: value.to(device) for key, value in encoded.items()},
+                max_length=max_target_length,
+                max_new_tokens=None,
+                num_beams=num_beams,
+            )
+            result.extend(decode_generated(tokenizer, generated))
+    return result

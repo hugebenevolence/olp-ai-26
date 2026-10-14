@@ -15,6 +15,8 @@ from torch import nn
 from torch.utils.data import Dataset
 from torchvision.transforms import v2
 
+from olp_ai_26.cv.weights import timm_weight_options
+
 
 class ImageTableDataset(Dataset[Any]):
     """Load RGB images and optional class indexes from a pandas annotation table."""
@@ -90,11 +92,10 @@ def build_image_classifier(
     checkpoint_path: Path | str | None = None,
     dropout: float = 0.0,
 ) -> nn.Module:
-    """Build a timm classifier; remote pretrained weights are opt-in."""
+    """Build a timm classifier using random initialization or explicitly staged legal weights."""
     model = timm.create_model(
         model_name,
-        pretrained=pretrained_allowed and checkpoint_path is None,
-        checkpoint_path=str(checkpoint_path or ""),
+        **timm_weight_options(pretrained_allowed, checkpoint_path),
         num_classes=num_classes,
         drop_rate=dropout,
     )

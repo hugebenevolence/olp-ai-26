@@ -1,167 +1,95 @@
-# OLP AI 2026 competition kit
+# OLP AI 2026 practical competition kit
 
-Reusable, offline-first baselines for a six-hour OlympicAI Vietnam workflow. The package is
-organized around a common inspection, validation, training, inference, and submission layer so
-task-specific code stays replaceable.
+A small toolkit for inspecting data, building a legal baseline, evaluating it correctly, and
+producing a reproducible submission within a six-hour competition. Python 3.12 or newer.
 
-For personal practice and team handoff, see the
-[15-day preparation plan](docs/15_DAY_PREPARATION.md) and the
-[14 October 2026 readiness audit](docs/READINESS_AUDIT_2026-10-14.md).
+**Start here: [your first practical session](docs/PRACTICE_QUICKSTART.md).**
+For the full learning sequence, follow the [15-day plan](docs/15_DAY_PREPARATION.md).
+The [guide index](docs/README.md) is the main documentation entry point.
 
-## Quick start
+## Get a complete CPU baseline working
 
 ```powershell
 uv sync --group dev
 uv run olp-ai doctor
-uv run olp-ai inspect data
+uv run olp-ai practice-data data/practice --task all
+```
+
+Open `notebooks/nlp_classification_template.ipynb` or `notebooks/tabular_template.ipynb` and
+point `DATA_DIR` at the selected practice pack's `data/` directory. Run through saving/reloading,
+inference, submission validation, and report creation. The packs deliberately shuffle sample IDs.
+Keep their grading answers closed until the exercise ends.
+
+Synthetic packs teach the workflow; their scores do not predict contest performance. Use real
+practice data next, and never add these packs to official contest training data.
+
+## Choose a task
+
+| Required output | Start with |
+|---|---|
+| Table class or numerical value | `tabular_template.ipynb` |
+| Text class, fast CPU route | `nlp_classification_template.ipynb` |
+| Image class | `cv_classification_template.ipynb` |
+| Binary semantic mask | `semantic_segmentation_template.ipynb` |
+| Other outputs | [Notebook catalog and exact default contracts](docs/BASELINE_CATALOG.md) |
+
+There are **16 generated notebooks**, including specialized Task 2 profiles and a robustness
+validation drill. Complete practice workflows still require adaptation to the released task's
+metric, legal resources, schema, and output contract. Detection's default AP50 is explicitly a
+practice evaluator; it is not COCO mAP.
+
+## Use Colab correctly
+
+1. Put this repository at `/content/olp-ai-26` and open a generated notebook.
+2. Use the bootstrap; do not run `uv sync` or install the project with pip in Colab.
+3. Inspect `gpu_report()` before choosing batch size or precision.
+4. Stage media under `/content/olp_runtime`; use Drive for input archives and durable output copies.
+5. Save the complete solution recipe, including tokenizer/preprocessing, class order, and thresholds.
+
+The bootstrap installs only requested missing dependencies, with constraints on the installed
+numerical/CUDA stack. Precision is BF16 when supported, FP16 otherwise, and off on CPU.
+See the [Colab runbook](docs/COLAB_RUNBOOK.md) for setup and recovery. Verify the organizer's
+actual platform separately; prepared-code, internet, Drive, and personal Colab access are not assumed.
+
+## Weight policy and correctness
+
+Generic pretrained defaults are disabled. CV models use explicitly staged local files; HF helpers
+are local-only by default. Task 2's specific permitted-weight profiles must not be reused as general
+permission. A local checkpoint or tokenizer is legal only when its provenance is allowed.
+
+Keep prediction IDs through inference and use ID-aware `build_submission`. Verify the exact
+metric averaging, label set, empty/ignored cases, and required prediction type. Fit preprocessing
+on training only; use grouped/time splits when identities or acquisition time can leak.
+
+The shared trainer supports hardware-aware AMP, sample-weighted accumulation, clipping,
+scheduling, early stopping, time reserves, and atomic best checkpoints. It reloads the best model
+for inference; it does not promise exact training continuation with all scheduler/scaler/random state.
+
+## Find a recipe or inspect readiness
+
+- [Guide index](docs/README.md): choose a document by what you want to do.
+- [Customization cookbook](docs/CUSTOMIZATION_GUIDE.md): splits, metrics, weights, models, losses, TTA.
+- [Implementation status](docs/IMPLEMENTATION_STATUS.md): repairs and verification boundaries.
+- [Model catalog](docs/MODEL_CATALOG.md): supported model identifiers.
+- [Archived Task 2 runbook](docs/TASK2_ANOMALY_DETECTION.md): normal-only anomaly case study.
+
+## Develop and verify
+
+Canonical notebook sources are `notebooks/*_template.py`. Regenerate artifacts after template edits:
+
+```powershell
+uv run ruff format .
+uv run ruff check .
 uv run olp-ai build-notebooks
 uv run pytest
+uv run python -m compileall -q src tests scripts notebooks
+uv lock --check
+git diff --check
 ```
 
-Generated notebooks are written next to the `# %%` templates in `notebooks/`.
+Install optional groups only for the selected task:
+`uv sync --group dev --group cv-extra --group nlp-extra --group notebook`.
+Tracking, audio, and fast-data packages remain separate. If the Windows cache is inaccessible,
+use `uv --cache-dir .uv-cache ...`.
 
-Install task-specific extras only when the released problem needs them:
-
-```powershell
-uv sync --group dev --group cv-extra --group nlp-extra --group notebook
-```
-
-`tracking`, `fast-data`, and `audio` are separate groups because they are not required by the
-baseline path and materially increase setup time.
-
-## Google Colab Pro
-
-The generated notebooks target the hosted Colab GPU runtime. Current pin-able 2026 Colab
-runtimes use Python 3.12 and PyTorch 2.9-2.11, so do **not** run `uv sync` inside Colab: the local
-lock may replace Google's CUDA-matched PyTorch build. See the official
-[runtime-version list](https://research.google.com/colaboratory/runtime-version-faq.html).
-
-1. Select **Runtime → Change runtime type → GPU**.
-2. Upload or clone this repository to `/content/olp-ai-26`.
-3. Open one of the generated `.ipynb` files and run its Colab bootstrap cell.
-4. Set `DRIVE_DATA_ARCHIVE` to a `.zip`/`.tar.gz` on Drive, or upload the extracted data directly
-   to `/content/olp_runtime/data`.
-5. Optionally set `PERSISTENT_DIR` to a Drive folder for best-checkpoint and submission backups.
-
-The bootstrap adds the repository's `src/` directory directly to `sys.path`; it does not build or
-install the project. This preserves Colab's PyTorch, torchvision, NumPy, and CUDA stack and avoids
-downloading the `uv_build` backend. It installs only the small packages in
-`requirements-colab.txt` when they are missing.
-
-Training and repeated media reads happen under `/content`, not Google Drive. Only checkpoints,
-submissions, configurations, and reports are copied back to `PERSISTENT_DIR`. This avoids the
-Drive latency and I/O failure mode described in the official
-[Colab FAQ](https://research.google.com/colaboratory/faq.html).
-
-Mixed precision is hardware-aware:
-
-- BF16 when `torch.cuda.is_bf16_supported()` is true.
-- FP16 plus gradient scaling on older GPUs such as T4.
-- Disabled automatically on CPU.
-
-Always inspect the output of `gpu_report()` at the beginning of the session. Colab Pro improves
-access, but Google does not guarantee a particular GPU type or fixed resource limits.
-
-## First 45 minutes of a contest
-
-1. Read the task, metric, model allowlist, submission limit, and private-test procedure.
-2. Run `olp-ai doctor` and `olp-ai inspect data`.
-3. Identify train, test, sample-submission, input, target, ID, and grouping columns.
-4. Reproduce the official metric locally.
-5. Check duplicate examples and group leakage before choosing a split.
-6. Change only the configuration cell in the nearest notebook template.
-7. Train the cheapest baseline and validate the resulting submission file.
-8. Submit once before changing models or augmentations.
-
-## Available components
-
-Use [the baseline catalog](docs/BASELINE_CATALOG.md) to select a notebook by required output,
-[the model catalog](docs/MODEL_CATALOG.md) to discover supported identifiers, and the
-[customization cookbook](docs/CUSTOMIZATION_GUIDE.md) for copy-ready syntax. The
-[Colab runbook](docs/COLAB_RUNBOOK.md) covers staging and recovery. For the released normal-only
-vision task, follow the dedicated [Task 2 anomaly-detection runbook](docs/TASK2_ANOMALY_DETECTION.md).
-
-### Shared core
-
-- `core.config`: reproducibility, device resolution, trainer settings, and wall-clock budget.
-- `core.colab`: `/content` staging, GPU reporting, precision flags, Drive backup, and loaders.
-- `core.inspect`: table/media inventory, corrupt-image detection, duplicate hashes, environment report.
-- `core.split`: random, stratified, grouped, stratified-grouped, and chronological holdouts.
-- `core.metrics`: accuracy/F1, seqeval F1, regression, Dice/IoU, BLEU/chrF, ROUGE-L,
-  PSNR, and SSIM.
-- `core.trainer`: AdamW/Adam/SGD/Adafactor, AMP, accumulation, clipping, schedulers, checkpoints.
-- `core.inference`: batch inference, TTA averaging, timing, and weighted ensembles.
-- `core.submission`: row, column, ID-order, missing-value, and allowed-label validation.
-- `core.experiment` and `core.report`: offline JSONL tracking and technical-report generation.
-- `validation.leakage`: normalized-text duplicates, file hashes, and cross-split overlap.
-
-### CV
-
-- Normal-only image anomaly detection with per-category patch memory and frozen calibration.
-- Any timm image classifier, a curated Colab preset catalog, reusable transforms, and named TTA.
-- Frame-sampled video/activity classification with a 2D backbone and temporal pooling.
-- Nine SMP semantic-segmentation architectures, encoder discovery, Dice+BCE, RLE, and mask TTA.
-- Faster R-CNN box detection plus a local-only Ultralytics YOLO adapter.
-- Mask R-CNN instance segmentation.
-- Strong timm classification with an auxiliary semantic-segmentation head.
-- FGSM and PGD attacks with perturbation auditing.
-
-### NLP and multimodal
-
-- CPU-first word+character TF-IDF logistic-regression classifier.
-- Local-only Hugging Face sequence and token classifiers.
-- Translation/seq2seq tokenization and model factory.
-- TF-IDF retrieval plus reciprocal-rank evaluation.
-- Local image-captioning model factory and generation helper.
-
-## Notebook templates
-
-There are 14 generated Colab notebooks. The canonical `*_template.py` sources cover:
-
-- Normal-only image anomaly detection, image/video classification, semantic segmentation,
-  classification plus a mask head, object detection, instance segmentation, and robustness.
-- TF-IDF and transformer text classification, token classification/NER, retrieval/ranking, and
-  seq2seq generation.
-- Image captioning.
-
-See [the catalog](docs/BASELINE_CATALOG.md) for exact filenames, inputs, outputs, and metrics.
-
-They are source-controlled as Python because diffs remain readable. Export them with:
-
-```powershell
-uv run olp-ai build-notebooks
-```
-
-The resulting `.ipynb` files assume this package is available. Before the event, test notebook
-execution against the exact official Colab/Kaggle image. Do not assume the local lock file or
-private repository will be available in the final room.
-
-## Weight and data policy
-
-Pretrained models are opt-in. Hugging Face helpers default to `local_files_only=True`, and the
-YOLO adapter requires an explicit local file. Set `pretrained_allowed=True` only when the task's
-model allowlist permits the exact weights. Do not pseudo-label or otherwise train on the test set
-unless the task explicitly authorizes it.
-
-## Six-hour operating plan
-
-| Time | Outcome |
-|---|---|
-| 00:00–00:30 | Read rules, inspect data, reproduce metric, assign one owner per task |
-| 00:30–01:00 | Valid baseline and submission for both tasks |
-| 01:00–03:30 | Controlled model, split, loss, and augmentation experiments |
-| 03:30–04:45 | Error analysis, stronger run, inference timing |
-| 04:45–05:30 | TTA/ensemble only when validation evidence supports it |
-| 05:30–06:00 | Final inference, validated files, weights, notebook, technical report |
-
-Never spend the final 30 minutes starting a new training run.
-
-## Adding a task
-
-Keep the core unchanged. A new adapter should define only:
-
-1. Dataset and preprocessing.
-2. Model construction under the explicit pretrained-weight policy.
-3. Loss and prediction decoding.
-4. Official metric inputs.
-5. Submission-column mapping.
+Keep `core/` task-agnostic and task adapters small. Follow [AGENTS.md](AGENTS.md) when changing code.

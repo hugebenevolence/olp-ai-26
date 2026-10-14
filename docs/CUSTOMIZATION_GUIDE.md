@@ -1,7 +1,74 @@
 # Drag-and-plug customization cookbook
 
+[Guide index](README.md) · [Notebook contracts](BASELINE_CATALOG.md) ·
+[Current implementation status](IMPLEMENTATION_STATUS.md)
+
 This page is intentionally syntax-first. Copy a block into the configuration/model section of the
 nearest notebook, then change one experimental axis at a time.
+
+## Align predictions by ID
+
+```python
+submission = build_submission(
+    sample,
+    {TARGET_COLUMN: predictions},
+    prediction_ids=test[[ID_COLUMN]],
+    id_columns=ID_COLUMN,
+)
+write_submission(
+    submission,
+    output_dir / "submission.csv",
+    sample=sample,
+    id_columns=ID_COLUMN,
+)
+```
+
+Use a DataFrame of all key columns for composite IDs, such as query ID plus rank. Keys must be
+unique across the complete key. Schema validation alone cannot verify which example produced a
+prediction. Keep inference order and IDs together; do not copy sample IDs onto an unrelated array.
+
+## Select the split and exact metric
+
+```python
+split = make_split(
+    train,
+    target_columns=TARGET_COLUMN,
+    group_column="person_id",
+    valid_size=0.2,
+    seed=42,
+)
+score = evaluate_metric("macro_f1", truth, labels, labels=[0, 1, 2])
+mask_score = evaluate_metric("dice_mean_image", masks, predictions, empty_score=1.0)
+```
+
+For chronological data, set `time_column` instead of a random split. Combining time and group
+constraints can fail when a group crosses the cutoff; design a coherent cutoff rather than
+ignoring overlap. `dice`/`iou` aggregate globally; `*_mean_image` average the first-axis image
+scores. Binary masks must be 0/1, with an explicitly configured ignored value when necessary.
+Match the official empty-mask and ignored-pixel rules.
+
+AUROC and average precision need class scores, and log loss needs probabilities in class order.
+Do not feed hard labels from the shared classifier decoder into those metrics. The tabular
+notebook includes explicit probability handling; other tasks need the corresponding callback.
+
+## Stage permitted weights before modeling
+
+```python
+model = build_image_classifier(
+    "resnet18",
+    num_classes=NUM_CLASSES,
+    pretrained_allowed=True,
+    checkpoint_path=DATA_DIR / "models" / "permitted_resnet18.pt",
+)
+```
+
+Only enable this when the task allows that exact checkpoint. Native timm identifiers load the
+staged original weights with head adaptation; there is no automatic weight download. To reload
+your own matching task state, leave pretrained initialization disabled and load its exact state.
+Torchvision detection factories accept original permitted COCO state for initialization, then
+replace task heads; task checkpoint reloads must match the architecture and classes. SMP expects
+a matching full segmentation state via `checkpoint_path`. HF directories must include local
+configuration, tokenizer/processor, and permitted weights when pretrained initialization is enabled.
 
 ## Model, optimizer, scheduler, and loss
 
@@ -52,6 +119,10 @@ Segmentation uses inverse transforms to realign masks:
 logits = predict_segmentation_tta(model, test_loader, device="auto", names=("identity", "hflip"))
 masks = logits.sigmoid() >= 0.5
 ```
+
+For the binary mask notebook, `restore_binary_masks` resizes logits to each original image before
+thresholding and encoding. The same TTA, threshold, foreground policy, and original-size scorer
+select the best checkpoint. A different required output resolution needs the task's adapter.
 
 ## Semantic segmentation swap
 

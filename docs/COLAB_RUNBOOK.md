@@ -1,5 +1,7 @@
 # Google Colab Pro competition runbook
 
+[Guide index](README.md) · [First practice session](PRACTICE_QUICKSTART.md)
+
 ## Before the event
 
 - Generate every notebook with `uv run olp-ai build-notebooks` and upload/clone the repository to
@@ -11,10 +13,27 @@
 ## Runtime setup
 
 1. Select a GPU runtime.
-2. Run the bootstrap cell. It adds `src/` to `sys.path` and installs only missing small packages.
+2. Run the bootstrap cell. It adds `src/` to `sys.path` and installs only the notebook's requested
+   missing dependencies. Constraints pin the existing torch/torchvision/NumPy/CUDA packages.
+   A resolver conflict fails clearly; do not remove the constraints to force installation.
 3. Read `gpu_report()`; do not assume T4, L4, A100, memory size, or BF16 support.
 4. Set `PERSISTENT_DIR` for checkpoints/submissions and `DRIVE_DATA_ARCHIVE` for the input archive.
 5. Call `stage_data()` once, then repeatedly read from `/content`, not mounted Drive.
+
+Record package versions before and after first bootstrap. A live GPU install remains a required
+rehearsal; local tests only inspect the bootstrap's behavior with a simulated resolver.
+
+## Cold reload and durable artifacts
+
+Each generic task writes into its own output subdirectory. Preserve a whole run before changing
+configuration: fitted pipeline or checkpoint, tokenizer/processor files, label order, thresholds,
+`run.json`, report, submission, and executable notebook/source. Sync the task directory to a
+durable destination outside that directory. Include the final ZIP when the task requests one.
+
+The CPU text and tabular models have `save`/`load` methods. For torch/HF models, construct the
+recorded architecture and preprocessing first, then load the matching state. Reproducing inference
+is separate from exact training continuation; the common trainer does not restore all scheduler,
+scaler, and random-generator state for an exact resume.
 
 ## Six-hour safeguards
 
@@ -29,6 +48,7 @@
 - A random row split can leak subject, video, document, or timestamp identity.
 - Dice and IoU are not interchangeable with the organizer's exact metric implementation.
 - Detection class 0 is background in torchvision.
-- `pretrained=True` may trigger a network download and violate the rules.
+- Local weight files still need exact task permission. CV helpers require staged files and HF
+  loaders are local-only; do not bypass these checks to download a model during a restricted run.
 - TTA and ensembles increase inference time and are not automatically beneficial.
 - A notebook that runs locally is not evidence that the clean Colab runtime is ready.

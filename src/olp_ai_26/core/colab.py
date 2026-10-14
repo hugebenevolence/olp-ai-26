@@ -2,11 +2,79 @@
 
 from __future__ import annotations
 
+import importlib.metadata
+import importlib.util
 import shutil
+import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
+
+
+def install_missing_dependencies(
+    requirements: Path | str,
+    *,
+    required_modules: Sequence[str] | None = None,
+) -> list[str]:
+    """Install only requested missing modules, constraining Colab's installed numerical/GPU stack.
+
+    A changed protected version or a resolver conflict is an error. Existing but incompatible
+    optional packages are not upgraded silently. Network installation is used only by Colab's
+    explicit bootstrap; local environments should use uv.
+    """
+    module_names = {
+        "segmentation-models-pytorch": "segmentation_models_pytorch",
+        "rouge-score": "rouge_score",
+    }
+    selected = set(required_modules) if required_modules is not None else None
+    missing = []
+    for line in Path(requirements).read_text(encoding="utf-8").splitlines():
+        specification = line.strip()
+        if not specification or specification.startswith("#"):
+            continue
+        name = specification.split("<")[0].split(">")[0].split("=")[0].strip()
+        module = module_names.get(name, name.replace("-", "_"))
+        if (selected is None or module in selected) and importlib.util.find_spec(module) is None:
+            missing.append(specification)
+    if not missing:
+        return []
+    protected = {}
+    for distribution in importlib.metadata.distributions():
+        name = distribution.metadata.get("Name", "").lower().replace("_", "-")
+        if name in {"torch", "torchvision", "numpy", "triton"} or name.startswith("nvidia-"):
+            protected[name] = distribution.version
+    if not {"torch", "torchvision", "numpy"}.issubset(protected):
+        raise RuntimeError("Colab bootstrap expects the existing torch/torchvision/NumPy stack")
+    constraint = Path.cwd() / f".colab-stack-{uuid4().hex}.txt"
+    try:
+        constraint.write_text(
+            "\n".join(f"{name}=={version}" for name, version in protected.items()) + "\n",
+            encoding="utf-8",
+        )
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--quiet",
+                "--disable-pip-version-check",
+                "--constraint",
+                str(constraint),
+                *missing,
+            ],
+            check=True,
+        )
+    finally:
+        constraint.unlink(missing_ok=True)
+    for name, version in protected.items():
+        if importlib.metadata.version(name) != version:
+            raise RuntimeError(f"Bootstrap changed protected package {name}; restart the runtime")
+    importlib.invalidate_caches()
+    return missing
 
 
 def is_colab() -> bool:
@@ -90,6 +158,12 @@ def sync_artifacts(
         "*.bin",
         "*.safetensors",
         "*.model",
+        "*.pkl",
+        "*.joblib",
+        "*.txt",
+        "*.zip",
+        "*.ipynb",
+        "*.py",
         "*.csv",
         "*.json",
         "*.md",
@@ -100,6 +174,11 @@ def sync_artifacts(
         return []
     source = Path(source_dir)
     destination = Path(destination_dir)
+    if (
+        source.resolve() == destination.resolve()
+        or source.resolve() in destination.resolve().parents
+    ):
+        raise ValueError("Artifact destination must be outside the source directory")
     destination.mkdir(parents=True, exist_ok=True)
     copied: list[Path] = []
     seen: set[Path] = set()

@@ -11,6 +11,8 @@ from torch import nn
 from torch.utils.data import Dataset
 from torchvision.transforms import functional as TF
 
+from olp_ai_26.cv.weights import local_checkpoint
+
 INSTANCE_SEGMENTATION_ARCHITECTURES = (
     "maskrcnn_resnet50_fpn_v2",
     "maskrcnn_resnet50_fpn",
@@ -84,11 +86,12 @@ def build_instance_segmentation_model(
     *,
     architecture: str = "maskrcnn_resnet50_fpn_v2",
     pretrained_allowed: bool = False,
+    checkpoint_path: Path | str | None = None,
 ) -> nn.Module:
     """Build Mask R-CNN and replace its box and mask predictors.
 
-    ``num_classes`` includes background. Default weights are downloaded only when
-    ``pretrained_allowed=True``.
+    ``num_classes`` includes background. Staged full model state must match the architecture and
+    label count; this factory never downloads weights.
     """
     from torchvision.models.detection import maskrcnn_resnet50_fpn, maskrcnn_resnet50_fpn_v2
     from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
@@ -104,12 +107,14 @@ def build_instance_segmentation_model(
         raise ValueError(
             f"Unknown instance model {architecture!r}; choose {sorted(factories)}"
         ) from error
-    model = factory(
-        weights="DEFAULT" if pretrained_allowed else None,
-        weights_backbone="DEFAULT" if pretrained_allowed else None,
-    )
+    checkpoint = local_checkpoint(pretrained_allowed, checkpoint_path)
+    model = factory(weights=None, weights_backbone=None)
+    if checkpoint and pretrained_allowed:
+        model.load_state_dict(torch.load(checkpoint, map_location="cpu", weights_only=True))
     box_features = model.roi_heads.box_predictor.cls_score.in_features
     model.roi_heads.box_predictor = FastRCNNPredictor(box_features, num_classes)
     mask_features = model.roi_heads.mask_predictor.conv5_mask.in_channels
     model.roi_heads.mask_predictor = MaskRCNNPredictor(mask_features, 256, num_classes)
+    if checkpoint and not pretrained_allowed:
+        model.load_state_dict(torch.load(checkpoint, map_location="cpu", weights_only=True))
     return model

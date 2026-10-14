@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path("/content/olp-ai-26") if "google.colab" in sys.modules else Path.cwd()
+REQUIRED_MODULES = ("timm", "pyzipper")
 exec((PROJECT_ROOT / "notebooks" / "_colab_bootstrap.py").read_text(encoding="utf-8"))
 
 # %%
@@ -28,6 +29,7 @@ import torch
 from torch.utils.data import DataLoader
 from torchvision.utils import save_image
 
+from olp_ai_26.core.artifacts import save_torch_state, write_single_file_zip
 from olp_ai_26.core.colab import (
     ColabPaths,
     dataloader_kwargs,
@@ -38,6 +40,7 @@ from olp_ai_26.core.colab import (
 from olp_ai_26.core.config import seed_everything
 from olp_ai_26.core.inspect import dataset_report
 from olp_ai_26.core.split import make_split
+from olp_ai_26.core.submission import write_submission
 from olp_ai_26.cv.anomaly_detection import (
     AnomalyImageDataset,
     DinoV2PatchFeatureExtractor,
@@ -772,7 +775,7 @@ if RUN_TRAINING:
         "model_states": model_states,
         "categories": category_artifacts,
     }
-    torch.save(bundle, BUNDLE_PATH)
+    save_torch_state(bundle, BUNDLE_PATH)
     calibration_report = {
         category: artifact["calibration"] for category, artifact in category_artifacts.items()
     }
@@ -864,11 +867,10 @@ def write_submission_candidate(labels, tag="main"):
     validate_anomaly_submission(submission, test_table)
     csv_name = f"{TASK_NAME}_{PHASE}_output.csv"
     csv_path = candidate_dir / csv_name
-    submission.to_csv(csv_path, index=False, encoding="utf-8")
+    write_submission(submission, csv_path)
     zip_suffix = "pub" if PHASE == "public" else "pri"
     zip_path = candidate_dir / f"{TEAM_NAME}_{TASK_NAME}_{zip_suffix}.zip"
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.write(csv_path, arcname=csv_name)
+    write_single_file_zip(csv_path, zip_path, arcname=csv_name)
     with zipfile.ZipFile(zip_path) as archive:
         if archive.namelist() != [csv_name]:
             raise RuntimeError("Submission ZIP must contain exactly the required CSV")

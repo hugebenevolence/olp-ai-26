@@ -15,6 +15,7 @@ from torch import nn
 from torch.utils.data import Dataset
 
 from olp_ai_26.cv.classification import build_image_transforms
+from olp_ai_26.cv.weights import timm_weight_options
 
 
 def sample_video_frames(path: Path | str, num_frames: int = 16) -> list[Image.Image]:
@@ -88,12 +89,16 @@ class TemporalPoolingClassifier(nn.Module):
         num_classes: int,
         *,
         pretrained_allowed: bool = False,
+        checkpoint_path: Path | str | None = None,
         pooling: str = "mean",
         dropout: float = 0.2,
     ) -> None:
         super().__init__()
         self.backbone = timm.create_model(
-            backbone_name, pretrained=pretrained_allowed, num_classes=0, global_pool="avg"
+            backbone_name,
+            **timm_weight_options(pretrained_allowed, checkpoint_path),
+            num_classes=0,
+            global_pool="avg",
         )
         self.pooling = pooling
         feature_dim = self.backbone.num_features

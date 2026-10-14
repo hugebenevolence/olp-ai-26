@@ -8,7 +8,16 @@ from typing import Any
 
 import numpy as np
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
-from sklearn.metrics import accuracy_score, f1_score, mean_absolute_error, mean_squared_error
+from sklearn.metrics import (
+    accuracy_score,
+    average_precision_score,
+    balanced_accuracy_score,
+    f1_score,
+    log_loss,
+    mean_absolute_error,
+    mean_squared_error,
+    roc_auc_score,
+)
 
 MetricFunction = Callable[..., float]
 
@@ -22,24 +31,66 @@ class MetricSpec:
 
 
 def _f1(average: str) -> MetricFunction:
-    return lambda y_true, y_pred, **_: float(
-        f1_score(y_true, y_pred, average=average, zero_division=0)
-    )
+    def score(y_true: Any, y_pred: Any, **kwargs: Any) -> float:
+        kwargs.setdefault("zero_division", 0)
+        return float(f1_score(y_true, y_pred, average=average, **kwargs))
+
+    return score
 
 
-def _dice(y_true: Any, y_pred: Any, threshold: float = 0.5, **_: Any) -> float:
-    truth = np.asarray(y_true).astype(bool)
-    prediction = np.asarray(y_pred) >= threshold
-    intersection = np.logical_and(truth, prediction).sum()
-    return float((2 * intersection + 1e-7) / (truth.sum() + prediction.sum() + 1e-7))
+def binary_mask_score(
+    y_true: Any,
+    y_pred: Any,
+    *,
+    metric: str = "dice",
+    threshold: float = 0.5,
+    reduction: str = "global",
+    empty_score: float = 1.0,
+    ignore_index: int | None = None,
+) -> float:
+    """Score binary masks with explicit global or first-axis per-image averaging.
+
+    Empty unions use ``empty_score``; ignored pixels are excluded from both masks. Inputs must
+    have identical shapes. This is not a multiclass metric or a substitute for an official grader.
+    """
+    truth_values, scores = np.asarray(y_true), np.asarray(y_pred)
+    if truth_values.shape != scores.shape or truth_values.size == 0:
+        raise ValueError("Masks must be nonempty and have identical shapes")
+    if not np.isfinite(scores).all():
+        raise ValueError("Mask predictions must be finite")
+    keep = np.ones(truth_values.shape, dtype=bool)
+    if ignore_index is not None:
+        keep = truth_values != ignore_index
+    if not np.isin(truth_values[keep], [0, 1]).all():
+        raise ValueError("Binary mask targets must contain only 0, 1, or ignore_index")
+    truth = truth_values.astype(bool) & keep
+    prediction = (scores >= threshold) & keep
+    if reduction == "global":
+        axes = None
+    elif reduction == "mean_image" and truth.ndim >= 2:
+        axes = tuple(range(1, truth.ndim))
+    else:
+        raise ValueError("reduction must be global or mean_image with a batch axis")
+    intersection = np.logical_and(truth, prediction).sum(axis=axes)
+    if metric == "dice":
+        numerator = 2 * intersection
+        denominator = truth.sum(axis=axes) + prediction.sum(axis=axes)
+    elif metric == "iou":
+        numerator = intersection
+        denominator = np.logical_or(truth, prediction).sum(axis=axes)
+    else:
+        raise ValueError("metric must be dice or iou")
+    values = np.full(np.shape(denominator), empty_score, dtype=float)
+    np.divide(numerator, denominator, out=values, where=denominator != 0)
+    return float(np.mean(values))
 
 
-def _iou(y_true: Any, y_pred: Any, threshold: float = 0.5, **_: Any) -> float:
-    truth = np.asarray(y_true).astype(bool)
-    prediction = np.asarray(y_pred) >= threshold
-    intersection = np.logical_and(truth, prediction).sum()
-    union = np.logical_or(truth, prediction).sum()
-    return float((intersection + 1e-7) / (union + 1e-7))
+def _dice(y_true: Any, y_pred: Any, **kwargs: Any) -> float:
+    return binary_mask_score(y_true, y_pred, metric="dice", **kwargs)
+
+
+def _iou(y_true: Any, y_pred: Any, **kwargs: Any) -> float:
+    return binary_mask_score(y_true, y_pred, metric="iou", **kwargs)
 
 
 def _bleu(y_true: list[str], y_pred: list[str], **_: Any) -> float:
@@ -90,6 +141,14 @@ def _seqeval_f1(y_true: list[list[str]], y_pred: list[list[str]], **_: Any) -> f
 
 METRICS: dict[str, MetricSpec] = {
     "accuracy": MetricSpec(lambda y, p, **_: float(accuracy_score(y, p)), True),
+    "balanced_accuracy": MetricSpec(
+        lambda y, p, **k: float(balanced_accuracy_score(y, p, **k)), True
+    ),
+    "roc_auc": MetricSpec(lambda y, p, **k: float(roc_auc_score(y, p, **k)), True),
+    "average_precision": MetricSpec(
+        lambda y, p, **k: float(average_precision_score(y, p, **k)), True
+    ),
+    "log_loss": MetricSpec(lambda y, p, **k: float(log_loss(y, p, **k)), False),
     "macro_f1": MetricSpec(_f1("macro"), True),
     "micro_f1": MetricSpec(_f1("micro"), True),
     "weighted_f1": MetricSpec(_f1("weighted"), True),
@@ -98,6 +157,8 @@ METRICS: dict[str, MetricSpec] = {
     "mae": MetricSpec(lambda y, p, **_: float(mean_absolute_error(y, p)), False),
     "dice": MetricSpec(_dice, True),
     "iou": MetricSpec(_iou, True),
+    "dice_mean_image": MetricSpec(lambda y, p, **k: _dice(y, p, reduction="mean_image", **k), True),
+    "iou_mean_image": MetricSpec(lambda y, p, **k: _iou(y, p, reduction="mean_image", **k), True),
     "bleu": MetricSpec(_bleu, True),
     "chrf": MetricSpec(_chrf, True),
     "rouge_l": MetricSpec(_rouge_l, True),

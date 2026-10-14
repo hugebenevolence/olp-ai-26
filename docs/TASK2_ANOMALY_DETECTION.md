@@ -1,5 +1,13 @@
 # Task 2 image anomaly-detection runbook
 
+[Guide index](README.md) · [Current implementation status](IMPLEMENTATION_STATUS.md)
+
+**Weight staging update:** current CV helpers do not download weights. In the original task
+template, fill `MODEL_CHECKPOINTS` for every backbone selected by the preset. In the DINO augmented
+template, set `MODEL_CHECKPOINT` to the exact permitted local DINOv2 file. The task profile's
+`PRETRAINED_ALLOWED=True` is permission for this archived task, not permission for other tasks.
+Existing frozen bundles reload their saved encoder state without another pretrained load.
+
 ## Exact task contract
 
 - Training contains 3,160 normal images across six independent categories.
@@ -166,11 +174,8 @@ rest of the pipeline.
 The DINO augmented notebook uses the same rule without replacing DINO's raw score scale:
 
 ```python
-combined_score = (
-    dino_score
-    + SYNTHETIC_EVIDENCE_WEIGHT
-    * heldout_dino_score_std
-    * max(0, auxiliary_logit - normal_margin)
+combined_score = dino_score + SYNTHETIC_EVIDENCE_WEIGHT * heldout_dino_score_std * max(
+    0, auxiliary_logit - normal_margin
 )
 ```
 

@@ -1,5 +1,7 @@
 # Model discovery and selection
 
+[Guide index](README.md) · [Notebook contracts](BASELINE_CATALOG.md)
+
 The examples in notebooks are starting points, **not the complete supported set**.
 
 ## Normal-only image anomaly detection
@@ -46,7 +48,8 @@ MODEL_NAME = "convnext_tiny"
 model = build_image_classifier(
     MODEL_NAME,
     num_classes=len(label_to_index),
-    pretrained_allowed=False,  # change only if the rules permit those exact weights
+    pretrained_allowed=False,  # opt in only with exact task permission and a staged file
+    checkpoint_path=None,
     dropout=0.1,
 )
 ```

@@ -1,5 +1,8 @@
 # Repository readiness audit — 14 October 2026
 
+**Historical snapshot before repairs.** For the current code and verification boundaries, use
+[implementation status](IMPLEMENTATION_STATUS.md) and the [guide index](README.md).
+
 **Verdict: useful competition foundation, with incomplete task workflows and confirmed correctness risks.**
 The repository is ready to support deliberate practice. It is not yet demonstrated ready for an
 unseen six-hour contest. This assessment covers commit `7515cbc`, source inspection, local CPU

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 
 import timm
 import torch
@@ -10,6 +11,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from olp_ai_26.cv.segmentation import DiceBCELoss
+from olp_ai_26.cv.weights import timm_weight_options
 
 
 class ClassificationSegmentationModel(nn.Module):
@@ -27,12 +29,13 @@ class ClassificationSegmentationModel(nn.Module):
         mask_classes: int = 1,
         decoder_channels: int = 128,
         pretrained_allowed: bool = False,
+        checkpoint_path: Path | str | None = None,
     ) -> None:
         """Build a feature-only timm encoder, classifier head, and lightweight FPN decoder."""
         super().__init__()
         self.encoder = timm.create_model(
             backbone_name,
-            pretrained=pretrained_allowed,
+            **timm_weight_options(pretrained_allowed, checkpoint_path),
             features_only=True,
             out_indices=(-4, -3, -2, -1),
         )

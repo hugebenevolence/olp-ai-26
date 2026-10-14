@@ -1,7 +1,5 @@
 """Executed by the first cell of each Colab notebook template."""
 
-import importlib.util
-import subprocess
 import sys
 from pathlib import Path
 
@@ -17,28 +15,11 @@ if source_root not in sys.path:
     sys.path.insert(0, source_root)
 
 if IN_COLAB:
-    required_modules = (
-        "accelerate",
-        "datasets",
-        "pyzipper",
-        "segmentation_models_pytorch",
-        "timm",
-        "transformers",
-        "sacrebleu",
-        "rouge_score",
-        "seqeval",
+    from olp_ai_26.core.colab import install_missing_dependencies
+
+    installed = install_missing_dependencies(
+        PROJECT_ROOT / "requirements-colab.txt",
+        required_modules=globals().get("REQUIRED_MODULES"),
     )
-    if any(importlib.util.find_spec(module) is None for module in required_modules):
-        subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                "--quiet",
-                "--disable-pip-version-check",
-                "--requirement",
-                str(PROJECT_ROOT / "requirements-colab.txt"),
-            ],
-            check=True,
-        )
+    if installed:
+        print("Installed missing notebook dependencies:", installed)

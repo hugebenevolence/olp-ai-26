@@ -35,8 +35,12 @@ def _inspect(args: argparse.Namespace) -> int:
 
 
 def _validate(args: argparse.Namespace) -> int:
-    submission = load_table(args.submission)
-    sample = load_table(args.sample)
+    submission = load_table(
+        args.submission, id_columns=args.id_column, empty_text_columns=args.allow_empty_column
+    )
+    sample = load_table(
+        args.sample, id_columns=args.id_column, empty_text_columns=args.allow_empty_column
+    )
     result = validate_submission(submission, sample, id_columns=args.id_column)
     for warning in result.warnings:
         print(f"WARNING: {warning}")
@@ -52,6 +56,16 @@ def _build_notebooks(args: argparse.Namespace) -> int:
     outputs = build_all_notebooks(args.directory)
     for path in outputs:
         print(f"Wrote {path}")
+    return 0
+
+
+def _practice_data(args: argparse.Namespace) -> int:
+    from olp_ai_26.practice import create_practice_pack
+
+    tasks = ["text", "tabular", "image", "segmentation"] if args.task == "all" else [args.task]
+    for task in tasks:
+        root = create_practice_pack(args.directory / task, task=task, seed=args.seed)
+        print(f"{task}: set DATA_DIR = {root / 'data'}")
     return 0
 
 
@@ -73,11 +87,27 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("submission", type=Path)
     validate.add_argument("sample", type=Path)
     validate.add_argument("--id-column", action="append", default=[])
+    validate.add_argument(
+        "--allow-empty-column",
+        action="append",
+        default=[],
+        help="Allow an empty serialized text field only when the task permits it (e.g. empty RLE)",
+    )
     validate.set_defaults(handler=_validate)
 
     notebooks = commands.add_parser("build-notebooks", help="Export # %% templates to ipynb")
     notebooks.add_argument("--directory", type=Path, default=Path("notebooks"))
     notebooks.set_defaults(handler=_build_notebooks)
+
+    practice = commands.add_parser(
+        "practice-data", help="Create offline synthetic packs for workflow drills"
+    )
+    practice.add_argument("directory", type=Path)
+    practice.add_argument(
+        "--task", choices=["text", "tabular", "image", "segmentation", "all"], default="all"
+    )
+    practice.add_argument("--seed", type=int, default=42)
+    practice.set_defaults(handler=_practice_data)
     return parser
 
 

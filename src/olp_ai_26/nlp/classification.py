@@ -11,6 +11,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import FeatureUnion, Pipeline
 
+from olp_ai_26.core.artifacts import load_pickle, save_pickle
 from olp_ai_26.nlp.text_cleaning import normalize_text
 
 
@@ -23,14 +24,18 @@ class TfidfTextClassifier:
         max_features: int = 200_000,
         class_weight: str | dict[Any, float] | None = "balanced",
         random_state: int = 42,
+        C: float = 4.0,
+        word_ngram_range: tuple[int, int] = (1, 2),
+        char_ngram_range: tuple[int, int] = (3, 5),
+        min_df: int = 2,
     ) -> None:
         features = FeatureUnion(
             [
                 (
                     "word",
                     TfidfVectorizer(
-                        ngram_range=(1, 2),
-                        min_df=2,
+                        ngram_range=word_ngram_range,
+                        min_df=min_df,
                         max_features=max_features // 2,
                         sublinear_tf=True,
                     ),
@@ -39,8 +44,8 @@ class TfidfTextClassifier:
                     "char",
                     TfidfVectorizer(
                         analyzer="char_wb",
-                        ngram_range=(3, 5),
-                        min_df=2,
+                        ngram_range=char_ngram_range,
+                        min_df=min_df,
                         max_features=max_features // 2,
                         sublinear_tf=True,
                     ),
@@ -48,7 +53,7 @@ class TfidfTextClassifier:
             ]
         )
         classifier = LogisticRegression(
-            C=4.0,
+            C=C,
             max_iter=1000,
             class_weight=class_weight,
             random_state=random_state,
@@ -71,6 +76,18 @@ class TfidfTextClassifier:
     def predict_proba(self, texts: Iterable[object]) -> np.ndarray:
         """Predict class probabilities in the fitted classifier's class order."""
         return self.pipeline.predict_proba(self._clean(texts))
+
+    def save(self, path: Path | str) -> Path:
+        """Save the fitted vectorizers, classifier, and normalization wrapper atomically."""
+        return save_pickle(self, path)
+
+    @classmethod
+    def load(cls, path: Path | str) -> TfidfTextClassifier:
+        """Reload a trusted saved text pipeline and check its type."""
+        value = load_pickle(path)
+        if not isinstance(value, cls):
+            raise TypeError("Saved artifact is not a TfidfTextClassifier")
+        return value
 
 
 def build_hf_text_classifier(

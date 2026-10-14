@@ -28,7 +28,7 @@ def predict_logits(
     model: nn.Module,
     loader: Iterable[Any],
     *,
-    device: str = "cuda",
+    device: str = "auto",
     transforms: list[Callable[[Any], Any]] | None = None,
     mixed_precision: bool = True,
 ) -> np.ndarray:
@@ -93,7 +93,12 @@ def weighted_ensemble(
     weights_array = np.asarray(
         weights if weights is not None else [1.0] * len(predictions), dtype=float
     )
-    if len(weights_array) != len(predictions) or weights_array.sum() <= 0:
+    if (
+        len(weights_array) != len(predictions)
+        or not np.isfinite(weights_array).all()
+        or (weights_array < 0).any()
+        or weights_array.sum() <= 0
+    ):
         raise ValueError("Invalid ensemble weights")
     weights_array /= weights_array.sum()
     return np.average(np.stack(predictions), axis=0, weights=weights_array)
