@@ -4,6 +4,10 @@ Reusable, offline-first baselines for a six-hour OlympicAI Vietnam workflow. The
 organized around a common inspection, validation, training, inference, and submission layer so
 task-specific code stays replaceable.
 
+For personal practice and team handoff, see the
+[15-day preparation plan](docs/15_DAY_PREPARATION.md) and the
+[14 October 2026 readiness audit](docs/READINESS_AUDIT_2026-10-14.md).
+
 ## Quick start
 
 ```powershell
