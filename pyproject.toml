@@ -58,6 +58,7 @@ tracking = [
 fast-data = ["polars>=1.0"]
 audio = ["torchaudio>=2.7"]
 kaggle-extra = [
+    "kaggle>=2.2,<3",
     "lightgbm>=4.5",
 ]
 
