@@ -68,6 +68,11 @@ olp-ai = "olp_ai_26.cli:main"
 requires = ["uv_build>=0.12.5,<0.13.0"]
 build-backend = "uv_build"
 
+[tool.uv]
+# A plain sync prepares every baseline/advanced learning notebook and local checks.
+# Extended CV/NLP tools, tracking, audio, and fast-data stay opt-in.
+default-groups = ["dev", "notebook", "kaggle-extra"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

@@ -159,6 +159,7 @@ def sync_artifacts(
         "*.safetensors",
         "*.model",
         "*.pkl",
+        "*.npz",
         "*.joblib",
         "*.txt",
         "*.zip",
@@ -167,6 +168,7 @@ def sync_artifacts(
         "*.csv",
         "*.json",
         "*.md",
+        "*.png",
     ),
 ) -> list[Path]:
     """Persist only small, important artifacts instead of training directly on Drive."""

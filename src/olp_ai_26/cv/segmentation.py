@@ -154,14 +154,20 @@ def build_segmentation_model(
 class DiceBCELoss(nn.Module):
     """Weighted sum of binary cross entropy and soft Dice loss."""
 
-    def __init__(self, dice_weight: float = 0.5, *, ignore_index: int | None = None) -> None:
+    def __init__(
+        self,
+        dice_weight: float = 0.5,
+        *,
+        ignore_index: int | None = None,
+        pos_weight: torch.Tensor | None = None,
+    ) -> None:
         """Create the loss; ``dice_weight=1`` selects pure soft Dice."""
         super().__init__()
         if not 0 <= dice_weight <= 1:
             raise ValueError("dice_weight must be between 0 and 1")
         self.dice_weight = dice_weight
         self.ignore_index = ignore_index
-        self.bce = nn.BCEWithLogitsLoss()
+        self.bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """Compute loss from raw logits and binary masks of the same shape."""
@@ -173,7 +179,9 @@ class DiceBCELoss(nn.Module):
             else targets != self.ignore_index
         )
         targets = targets.float().masked_fill(~keep, 0)
-        pixel_loss = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+        pixel_loss = F.binary_cross_entropy_with_logits(
+            logits, targets, pos_weight=self.bce.pos_weight, reduction="none"
+        )
         bce = (pixel_loss * keep).sum() / keep.sum().clamp_min(1)
         probabilities = logits.sigmoid() * keep
         axes = tuple(range(1, probabilities.ndim))

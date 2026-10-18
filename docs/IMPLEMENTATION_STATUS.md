@@ -1,9 +1,134 @@
 # Current implementation status
 
-Updated 14 October 2026. This page describes the repairs after the
+Updated 18 October 2026. This page describes the repairs after the
 [historical audit](READINESS_AUDIT_2026-10-14.md); it is not live Colab certification.
 
 [Guide index](README.md) · [Start a practice session](PRACTICE_QUICKSTART.md)
+
+## Paired learning curriculum — 18 October 2026
+
+Start with [the seven notebook pairs](../notebooks/learning/README.md). There are **14 new learning
+notebooks**, generated from adjacent canonical sources, alongside the 16 existing competition-kit
+notebooks. Each baseline has 11 code cells and a closed HTML-details solution immediately after
+every code cell: 77 solution cells across seven baselines. Marked answer blocks become small
+`NotImplementedError` exercises while the supplied setup/inspection scaffold remains executable.
+Advanced notebooks are worked component studies with primary evidence and explicit omissions;
+they are not claimed SOTA reproductions or universally fastest methods.
+
+Coverage: Home Credit classification, House Prices regression, Jigsaw multilabel text, Cassava
+image classes, TGS masks, Wheat detection and Shopee multimodal matching. Each route includes
+inspection/plots, training-fold imbalance diagnosis and response, leakage checks, saved candidates,
+validation/error plots, reload, ID-aware inference, checked output and a configuration/report bundle.
+Local data defaults to the seven staged schema fixtures. Colab uses fast runtime storage and the
+notebook's inline Drive mount function; each durable candidate gets a separate run-ID folder.
+Trainer best checkpoints back up to that same unique directory.
+
+All 14 learning notebooks are now **self-contained**. Project imports, repository-root discovery,
+search-path changes and external bootstrap execution were removed. Storage/configuration,
+leakage-aware splitting, datasets, model/loss construction, hardware-aware training, exact task
+metrics, ID alignment, CSV validation and reporting are defined visibly in the lesson itself.
+Only installed third-party libraries, staged data and explicitly permitted local assets are
+required. Nothing installs packages or fetches code/weights while a learning notebook runs.
+The older 16 competition-kit notebooks remain package-based references, clearly distinguished
+in the learning index and root README.
+
+The inline torch loop deliberately supports AdamW, one update per batch and no scheduler;
+unsupported precision/scheduler settings raise an error. It uses BF16 when supported, FP16
+otherwise on CUDA, FP32 on CPU, gradient clipping, global validation, a delivery reserve,
+atomic best-checkpoint writes and best-state reload. Detection keeps its separate visible FP32
+loop. A final boundary check caught a chronological-split bug: a large equal-timestamp block
+could otherwise produce an empty training fold. All standalone copies now choose the nearest
+legal boundary between distinct timestamps and reject overlapping group/time splits.
+
+The implementation also adds positive-pixel weighting to `DiceBCELoss`, explicit log-price/TGS/
+Wheat/matching metric helpers, and feature-cache/plot synchronization. Wheat's public statement
+and winner reference differ at boundaries; the helper exposes the convention and tests it rather
+than silently using COCO AP. The matching execution test caught and fixed an ambiguous sparse
+matrix length call. No test pseudo-labeling or new external training data path was introduced.
+
+The `kaggle-extra` group contains LightGBM. The notebook group supplies plotting and Jupyter tools.
+`pyproject.toml` now selects `dev`, `notebook`, and `kaggle-extra` by default, so plain `uv sync`
+prepares all 14 learning notebooks. Previously, a core/dev sync omitted those tools and removed
+them from the local environment. Extended CV/NLP, tracking, audio and fast-data remain opt-in;
+`uv sync --locked --all-groups` selects every declared group. The existing lockfile already covers
+these groups: regenerating it offline produced no changes. The default-group change introduces
+no new package constraints or versions. A real default sync, a second no-change sync, and
+`uv pip check` passed locally with 161 installed packages. The initial sandboxed installation hit
+a Windows launcher-resource permission error; completing the installation with normal local
+permissions succeeded.
+
+Dependency declarations and `uv.lock` were committed separately as `77df1a3`
+as required by AGENTS.md; lesson code and documentation remain available as working-tree changes.
+
+| Exact command | Final result |
+|---|---|
+| `uv --cache-dir .uv-cache sync --group dev --group notebook --group kaggle-extra --locked` | Installed the declared optional tools locally; existing torch stack retained. |
+| `uv --cache-dir .uv-cache sync --locked --link-mode copy` | Installed the default preparation groups, including notebook tools and LightGBM. |
+| `uv --cache-dir .uv-cache sync --locked` | Second sync passed with no missing packages. |
+| `uv --cache-dir .uv-cache pip check` | All 161 installed packages compatible. |
+| `uv --cache-dir .uv-cache run --no-sync ruff format .` | Passed; final run left 111 files unchanged. |
+| `uv --cache-dir .uv-cache run --no-sync ruff check .` | Passed. |
+| `uv --cache-dir .uv-cache run --no-sync olp-ai build-notebooks` | Generated all 30 notebooks. |
+| `uv --cache-dir .uv-cache run --no-sync pytest --basetemp .pytest_cache/standalone-final --tb=short` | **105 passed**, one Windows CPU-core fallback warning, 91.51 seconds. |
+| `uv --cache-dir .uv-cache run pytest --basetemp .pytest_cache/default-sync-final --tb=short` | **105 passed**, one Windows CPU-core fallback warning, 172.15 seconds, after the default sync. |
+| `uv --cache-dir .uv-cache run --no-sync python -m compileall -q src tests scripts notebooks` | Passed. |
+| `uv --cache-dir .uv-cache lock --check` | Passed; 255 packages resolved. |
+| `git diff --check` | Passed. |
+| `uv --cache-dir .uv-cache run --no-sync olp-ai practice-data data/learning --task learning` | Created all seven offline schema fixtures. |
+
+Additional verification validates all 14 learning artifacts against the Jupyter schema and checks
+canonical/artifact equality, 11-stage exercise/solution placement, malformed exercise boundaries,
+execution in separate working folders with both network connections and project imports blocked,
+inline metric fixtures, positive-mask-weight gradients, feature/plot copying,
+and two independent durable bundles. Fresh isolated Python processes (`python -I`) also complete
+the table and image baseline answers with project imports/network blocked. Inline split copies
+are checked for identical guards; storage tests reject escaping ZIP members and nested backups.
+The matching route executes both its feature-cache path and
+its local-encoder path using tiny random BERT and ResNet models, with no downloads. Two rendered
+inspection/segmentation plots were visually checked.
+
+All training/execution checks above are **local CPU**, with small synthetic data and short epochs.
+No real Kaggle dataset performance, leaderboard placement, Colab GPU run, organizer upload,
+DeepSeek interface or live notebook-viewer collapse behavior is certified. HTML details start
+closed structurally; rendering depends on the viewer. The fixtures cannot establish the advanced
+models' superiority. Follow the [data guide](LEARNING_DATASETS.md),
+[evidence ledger](KAGGLE_METHOD_EVIDENCE.md) and [learning scorecard](LEARNING_SCORECARD.md) for
+the actual preparation exercises.
+
+## Blank-notebook preparation — 18 October 2026
+
+The [blank-notebook playbook](BLANK_NOTEBOOK_PLAYBOOK.md) remains the reconstruction assessment path.
+The 15-day program starts reconstruction on Day 1, uses the stated 2k-context DeepSeek deployment
+for individual functions, and includes two assistant-free assessment sessions. The standalone
+learning notebooks remain the untimed study and comparison path; the older kit is a separate
+repository-assisted reference.
+
+The standalone [text/table answer key](../scripts/blank_baseline.py) uses no package imports from
+this project. Isolated Python processes outside the repository complete fitting, validation,
+persistence, shuffled-ID delivery, and fresh-process inference from the saved pipeline. Additional
+checks cover literal IDs/labels, invalid prediction keys, grouped splits, and equal-timestamp
+boundaries. All four executable [image exercise](BLANK_NOTEBOOK_CV.md) cells run through real
+training, best-checkpoint reload, decoding, CSV alignment and saved recipe on the small image pack.
+These are intentionally independent educational reconstructions, not replacements for the shared
+production trainer or its richer task adapters.
+
+Final local verification for this addition:
+
+| Exact command | Result |
+|---|---|
+| `uv --cache-dir .uv-cache run --no-sync ruff format .` | Passed; final run left all 90 files unchanged. |
+| `uv --cache-dir .uv-cache run --no-sync ruff check .` | Passed. |
+| `uv --cache-dir .uv-cache run --no-sync olp-ai build-notebooks` | Regenerated all 16 artifacts; no notebook diff. |
+| `uv --cache-dir .uv-cache run --no-sync pytest --basetemp .pytest_cache/blank-notebook-delivery --tb=short` | **77 passed**, one Windows CPU-core discovery fallback warning, 67.37 seconds. |
+| `uv --cache-dir .uv-cache run --no-sync python -m compileall -q src tests scripts notebooks` | Passed. |
+| `uv --cache-dir .uv-cache lock --check` | Passed; 254 packages resolved. No dependency changes. |
+| `git diff --check` | Passed. |
+
+The shell used the absolute installed uv executable because uv is not on PATH. A separate local
+Markdown check verified 15 documents, 74 local links, code-fence balance and whitespace.
+All execution was local **CPU** (PyTorch 2.13.0+cpu, sklearn 1.9.0). No live Colab GPU, real-dataset
+benchmark, organizer upload, or supplied DeepSeek interface was tested. Prompt sizing and coding
+time goals are practice guidance, not measured guarantees for that assistant or contest hardware.
 
 ## Correctness and runtime repairs
 

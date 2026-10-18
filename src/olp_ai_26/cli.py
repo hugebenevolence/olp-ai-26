@@ -62,6 +62,14 @@ def _build_notebooks(args: argparse.Namespace) -> int:
 def _practice_data(args: argparse.Namespace) -> int:
     from olp_ai_26.practice import create_practice_pack
 
+    if args.task == "learning":
+        from olp_ai_26.learning_data import LEARNING_FAMILIES, create_learning_pack
+
+        for family in LEARNING_FAMILIES:
+            root = create_learning_pack(args.directory / family, family=family, seed=args.seed)
+            print(f"{family}: synthetic schema fixture at {root}")
+        return 0
+
     tasks = ["text", "tabular", "image", "segmentation"] if args.task == "all" else [args.task]
     for task in tasks:
         root = create_practice_pack(args.directory / task, task=task, seed=args.seed)
@@ -104,7 +112,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     practice.add_argument("directory", type=Path)
     practice.add_argument(
-        "--task", choices=["text", "tabular", "image", "segmentation", "all"], default="all"
+        "--task",
+        choices=["text", "tabular", "image", "segmentation", "learning", "all"],
+        default="all",
     )
     practice.add_argument("--seed", type=int, default=42)
     practice.set_defaults(handler=_practice_data)

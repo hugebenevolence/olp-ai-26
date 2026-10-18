@@ -1,4 +1,8 @@
-# Your first practical session
+# Your first repo-assisted practical session
+
+This walkthrough assumes access to the repository. For restricted-room preparation, use the
+[blank-notebook playbook](BLANK_NOTEBOOK_PLAYBOOK.md): study this workflow once, then close the
+repo and reconstruct it. Successfully running a template does not prove closed-book readiness.
 
 Goal: produce a scored, reloadable baseline and correctly aligned submission in 45–60 minutes.
 Start with text or tabular data on CPU. Use a real dataset after the plumbing works.
@@ -13,7 +17,7 @@ If `data/practice` already contains the four packs, use them and skip the creati
 Choose a new destination such as `data/practice_round2` for another fresh exercise.
 
 ```powershell
-uv sync --group dev
+uv sync --locked
 uv run olp-ai doctor
 uv run olp-ai practice-data data/practice --task all
 ```
