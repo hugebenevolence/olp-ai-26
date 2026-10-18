@@ -57,6 +57,9 @@ tracking = [
 ]
 fast-data = ["polars>=1.0"]
 audio = ["torchaudio>=2.7"]
+kaggle-extra = [
+    "lightgbm>=4.5",
+]
 
 [project.scripts]
 olp-ai = "olp_ai_26.cli:main"
