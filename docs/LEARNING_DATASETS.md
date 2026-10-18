@@ -2,9 +2,10 @@
 
 [Learning notebook pairs](../notebooks/learning/README.md) · [Evidence ledger](KAGGLE_METHOD_EVIDENCE.md)
 
-Use the original dataset page for each problem. Download and accept applicable terms yourself
-before the timed exercise, extract locally, and keep the official sample submission. The notebooks
-do not fetch data or weights. A selected training subset is a practice budget, not a new benchmark.
+Use the original dataset page for each problem. Accept applicable terms yourself before the
+timed exercise and keep the official sample submission. Every learning notebook has an optional
+Kaggle download/extraction cell; manual local staging remains available. No model weights are
+fetched. A selected training subset is a practice budget, not a new benchmark.
 
 | Folder / dataset page | Required local contents | What to inspect first |
 |---|---|---|
@@ -21,6 +22,38 @@ use the self-contained notebook's inline folder/ZIP staging and durable-copy fun
 repository or companion Python source is needed. On Kaggle itself,
 point `DATA_DIR` at the actual mounted competition directory. Code competitions may impose a
 separate notebook submission contract; a locally checked CSV does not prove platform acceptance.
+
+## Download from a learning notebook
+
+1. On the competition's Kaggle page, review and accept its rules yourself. Some historical
+   competitions restrict access; an API token cannot bypass their access requirements.
+2. Locally run `uv sync --locked`: the default `kaggle-extra` group includes the official
+   `kaggle>=2.2,<3` client. For a copied notebook/Colab runtime, install that small client separately
+   only if missing; do not run uv sync in Colab or replace its torch/NumPy/CUDA packages.
+3. Configure credentials using Kaggle's environment/configuration support. The current client
+   supports `KAGGLE_API_TOKEN`, `~/.kaggle/access_token`, and legacy `~/.kaggle/kaggle.json`.
+   In Colab, `PROMPT_FOR_KAGGLE_TOKEN` defaults to true when downloading, providing hidden input;
+   blank input keeps already configured credentials. On a local machine, enable it if you want
+   that prompt. Never put the token directly in a saved code cell or commit a credential file.
+4. In stage 1 set `DATA_DIR` to a dedicated empty destination, then run setup. For example, use
+   `paths.data_dir / "kaggle" / FAMILY` instead of a folder already holding synthetic fixtures.
+5. In stage **1a**, set `DOWNLOAD_DATA=True` and run the cell. Each notebook already has its correct
+   competition slug and expected files/directories. The official command downloads the competition
+   ZIP into `DOWNLOAD_CACHE`; the notebook extracts into a temporary sibling folder and publishes
+   it only after layout checks pass. TGS train/test ZIPs and individually zipped CSVs are expanded.
+6. Confirm the printed dataset path, then restore `DOWNLOAD_DATA=False` for offline work. Training
+   time starts after acquisition. A marked complete folder or intact cache is reused on repeats.
+
+The cell never accepts rules or submits anything. Client errors direct you to check credentials,
+competition permissions, internet and disk space; captured client output is not copied into the
+notebook because it could contain signed URLs. A failed extraction preserves its temporary folder
+for inspection and leaves `DATA_DIR` unchanged. Archives plus extracted media can occupy several
+GB, so check storage before starting. The seven complete real datasets are not fetched during
+repository tests; those tests simulate client responses and exercise real archive extraction.
+
+Primary references: [official Kaggle CLI authentication](https://github.com/Kaggle/kaggle-cli/blob/main/docs/README.md#authentication),
+[competition-download command](https://github.com/Kaggle/kaggle-cli/blob/main/docs/competitions.md#kaggle-competitions-download),
+and [competition access/rules](https://www.kaggle.com/docs/competitions).
 
 For a genuinely unseen repeat, ask a teammate to prepare a smaller pack with intact group
 boundaries and shuffled sample IDs. Keep test labels outside the working notebook. Thresholds,

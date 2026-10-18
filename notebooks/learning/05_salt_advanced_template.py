@@ -21,7 +21,8 @@
 #
 # **Standalone:** this file contains every project-specific helper it uses. Only installed
 # third-party libraries and your local data/assets are required; no repository checkout, source
-# imports, project installation, network access or external bootstrap is used. Edit DATA_DIR and
+# imports, project installation or external bootstrap is used. Only the optional dataset cell
+# needs internet when enabled; all training works offline. Edit DATA_DIR and
 # output/storage settings in stage 1. Train media on local disk, then persist your output bundle.
 #
 # This notebook is a learning exercise, not a claimed leaderboard reproduction. No trained
@@ -40,7 +41,8 @@
 # ## 1. Bootstrap and configuration
 #
 # Run this supplied setup cell; edit only configuration values. Later algorithm cells contain
-# TODO blocks. No weights or datasets are downloaded. Stage data locally before repeated reads.
+# TODO blocks. No weights are fetched. The next optional cell can acquire practice data;
+# otherwise stage local data before repeated reads.
 # Each candidate gets a new output directory.
 #
 #
@@ -339,6 +341,201 @@ competition.prepare()
 budget = TimeBudget(TIME_BUDGET_MINUTES, reserve_minutes=DELIVERY_RESERVE_MINUTES)
 print(gpu_report())
 print("Local data:", DATA_DIR, "New candidate:", OUTPUT)
+
+# %% [markdown]
+# ## 1a. Download the practice dataset (optional, before the timed exercise)
+#
+# The cell is skipped by default. For online preparation, first accept this competition's
+# rules on its Kaggle page and configure credentials using the
+# [official authentication guide](https://github.com/Kaggle/kaggle-cli/blob/main/docs/README.md#authentication).
+# Set DOWNLOAD_DATA=True below. Local uv sync includes the official Kaggle client. In a copied
+# notebook/Colab runtime without it, install only `kaggle>=2.2,<3` before running this cell;
+# do not install this project or replace Colab's torch/NumPy/CUDA stack.
+#
+# Use KAGGLE_API_TOKEN in your environment, the client's configured token/legacy credential
+# file, or enable PROMPT_FOR_KAGGLE_TOKEN for hidden input. Never paste a token into saved code.
+# No rules are accepted automatically, no submission is uploaded, and no weights are fetched.
+# Downloads can be several GB: allow space for the cached ZIP plus extracted data. DATA_DIR
+# must be a dedicated empty folder (or a completed download from this cell). Existing manual
+# data/fixtures are left untouched; keep DOWNLOAD_DATA=False to use them.
+#
+# This cell reuses a completed dataset/cache, expands nested train/test/CSV archives, and
+# checks the expected layout. On Kaggle itself, attach competition data in the notebook UI,
+# point DATA_DIR at its mounted folder, and leave this switch off. For restricted-room drills,
+# prepare data beforehand and keep this cell disabled. The training timer restarts afterward.
+#
+
+# %%
+import os
+import subprocess
+from getpass import getpass
+from importlib.util import find_spec
+
+DOWNLOAD_DATA = False
+KAGGLE_COMPETITION = "tgs-salt-identification-challenge"
+EXPECTED_DATA_PATHS = (
+    "train.csv",
+    "sample_submission.csv",
+    "train/images",
+    "train/masks",
+    "test/images",
+)
+DOWNLOAD_CACHE = DATA_DIR.parent / "_downloads" / KAGGLE_COMPETITION
+DOWNLOAD_TIMEOUT_SECONDS = 7200
+PROMPT_FOR_KAGGLE_TOKEN = "google.colab" in sys.modules
+
+
+def extract_dataset_zip(source: Path, destination: Path) -> None:
+    """Extract data without allowing absolute paths, traversal or silent overwrites."""
+    destination = Path(destination).resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(source) as archive:
+        members = archive.infolist()
+        if sum(member.file_size for member in members) > shutil.disk_usage(destination).free:
+            raise OSError("Insufficient disk space for the next archive")
+        for member in members:
+            target = (destination / member.filename).resolve()
+            if not target.is_relative_to(destination):
+                raise ValueError("Archive contains a path outside the dataset folder")
+            if member.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # Duplicated paths indicate a wrong archive/layout; preserve the first file.
+            with archive.open(member) as incoming, target.open("xb") as outgoing:
+                shutil.copyfileobj(incoming, outgoing)
+
+
+def download_practice_data(
+    competition: str,
+    destination: Path,
+    cache: Path,
+    expected_paths: Sequence[str],
+    *,
+    prompt_token: bool = False,
+    timeout_seconds: int = 7200,
+) -> Path:
+    """Use the official CLI, then publish the complete extracted folder by renaming it."""
+    if not competition or any(
+        char not in "abcdefghijklmnopqrstuvwxyz0123456789-" for char in competition
+    ):
+        raise ValueError("Expected a Kaggle competition slug, not a URL or shell command")
+    destination, cache = Path(destination).resolve(), Path(cache).resolve()
+    if (
+        destination == cache
+        or cache.is_relative_to(destination)
+        or destination.is_relative_to(cache)
+    ):
+        raise ValueError("Dataset and download cache must be separate folders")
+    marker = destination / ".kaggle-source.json"
+    if marker.is_file():
+        source = json.loads(marker.read_text(encoding="utf-8"))
+        if source.get("competition") == competition and all(
+            (destination / path).exists() for path in expected_paths
+        ):
+            print("Reusing completed dataset:", destination)
+            return destination
+    if destination.exists() and any(destination.iterdir()):
+        raise FileExistsError(
+            "DATA_DIR is not empty/completed; choose a new folder or keep DOWNLOAD_DATA=False"
+        )
+    cache.mkdir(parents=True, exist_ok=True)
+    bundle = cache / f"{competition}.zip"
+    if not bundle.is_file() or not zipfile.is_zipfile(bundle):
+        if find_spec("kaggle") is None:
+            raise ModuleNotFoundError(
+                "Install kaggle>=2.2,<3 for online preparation; "
+                "local users can run uv sync --locked"
+            )
+        if prompt_token and not os.environ.get("KAGGLE_API_TOKEN"):
+            token = getpass("Kaggle API token (blank uses configured credentials): ").strip()
+            if token:
+                os.environ["KAGGLE_API_TOKEN"] = token
+        # No shell, embedded credentials, auto-acceptance, uploads or package installation.
+        command = [
+            sys.executable,
+            "-m",
+            "kaggle",
+            "competitions",
+            "download",
+            competition,
+            "--path",
+            str(cache),
+            "--quiet",
+        ]
+        if bundle.exists():
+            command.append("--force")  # A partial/invalid archive must be fetched again.
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+        if result.returncode:
+            # Do not put client output, possible signed URLs or credentials in saved notebooks.
+            raise RuntimeError(
+                f"Kaggle download failed (exit {result.returncode}). "
+                "Check credentials, competition access/rules, internet and disk space. "
+                "No dataset was published."
+            )
+        if not bundle.is_file() or not zipfile.is_zipfile(bundle):
+            raise ValueError("Kaggle did not produce a complete competition ZIP; check the cache")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = destination.with_name(f".{destination.name}-incoming-{uuid4().hex[:8]}")
+    staging.mkdir()
+    try:
+        extract_dataset_zip(bundle, staging)
+        # TGS has train.zip with images/ and masks/; some tasks also wrap CSVs in ZIPs.
+        for nested in sorted(staging.rglob("*.zip")):
+            folder = nested.parent
+            if nested.stem in {"train", "test", "train_images", "test_images"}:
+                with zipfile.ZipFile(nested) as archive:
+                    names = [item.filename for item in archive.infolist() if not item.is_dir()]
+                if names and not all(name.startswith(nested.stem + "/") for name in names):
+                    folder = nested.parent / nested.stem
+            extract_dataset_zip(nested, folder)
+            nested.unlink()  # The outer cached bundle remains available for recovery.
+        missing = [path for path in expected_paths if not (staging / path).exists()]
+        if missing:
+            raise FileNotFoundError(f"Unexpected dataset layout; missing: {missing}")
+        save_json(
+            {
+                "competition": competition,
+                "source": f"https://www.kaggle.com/competitions/{competition}/data",
+                "expected_paths": list(expected_paths),
+            },
+            staging / marker.name,
+        )
+        if destination.exists():
+            destination.rmdir()  # Only the previously checked empty directory.
+        staging.replace(destination)
+    except Exception as error:
+        raise RuntimeError(
+            "Dataset preparation failed; DATA_DIR was not replaced. "
+            f"Inspect partial extraction at {staging}"
+        ) from error
+    print("Prepared dataset:", destination)
+    return destination
+
+
+if DOWNLOAD_DATA:
+    if DATA_ARCHIVE is not None:
+        raise ValueError("Choose either DATA_ARCHIVE staging or DOWNLOAD_DATA, then rerun setup")
+    DATA_DIR = download_practice_data(
+        KAGGLE_COMPETITION,
+        DATA_DIR,
+        DOWNLOAD_CACHE,
+        EXPECTED_DATA_PATHS,
+        prompt_token=PROMPT_FOR_KAGGLE_TOKEN,
+        timeout_seconds=DOWNLOAD_TIMEOUT_SECONDS,
+    )
+source_marker = DATA_DIR / ".kaggle-source.json"
+if source_marker.is_file():
+    save_json(json.loads(source_marker.read_text(encoding="utf-8")), OUTPUT / "data_source.json")
+print("Download enabled:", DOWNLOAD_DATA, "Dataset folder:", DATA_DIR)
+# Dataset acquisition is preparation time, not part of the measured training/delivery budget.
+budget = TimeBudget(TIME_BUDGET_MINUTES, reserve_minutes=DELIVERY_RESERVE_MINUTES)
 
 # %% [markdown]
 # ## 2. Load data and enforce the contract

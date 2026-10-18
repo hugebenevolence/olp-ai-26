@@ -9,8 +9,9 @@ Updated 18 October 2026. This page describes the repairs after the
 
 Start with [the seven notebook pairs](../notebooks/learning/README.md). There are **14 new learning
 notebooks**, generated from adjacent canonical sources, alongside the 16 existing competition-kit
-notebooks. Each baseline has 11 code cells and a closed HTML-details solution immediately after
-every code cell: 77 solution cells across seven baselines. Marked answer blocks become small
+notebooks. Each baseline has 11 competition stages and one optional dataset acquisition cell
+(12 code cells), with a closed HTML-details solution immediately after every code cell:
+84 solution cells across seven baselines. Marked answer blocks become small
 `NotImplementedError` exercises while the supplied setup/inspection scaffold remains executable.
 Advanced notebooks are worked component studies with primary evidence and explicit omissions;
 they are not claimed SOTA reproductions or universally fastest methods.
@@ -32,6 +33,22 @@ required. Nothing installs packages or fetches code/weights while a learning not
 The older 16 competition-kit notebooks remain package-based references, clearly distinguished
 in the learning index and root README.
 
+Each learning notebook now includes **stage 1a**, an optional original-competition Kaggle
+download. It is disabled by default, uses the official CLI through the notebook's interpreter,
+reuses complete data/caches, extracts nested image/CSV ZIPs and checks the expected layout
+before publishing the folder. Existing unmarked data folders are preserved. Paths escaping an
+archive's extraction root and overlapping cache/data folders are rejected. Failed preparation
+leaves a temporary folder for inspection and never replaces the data directory. Credentials
+come from Kaggle's configuration/environment or hidden input; client output is withheld from
+saved notebook output. No competition rules are accepted and no submissions or weights are
+uploaded/downloaded. Acquisition happens before the training timer restarts. Offline execution
+continues to use staged data with `DOWNLOAD_DATA=False`.
+
+Download tests simulate the official client's response for all seven raw dataset layouts,
+including TGS train/test ZIPs and separately zipped CSVs. They verify disabled behavior,
+cache/data reuse, layout failures, traversal rejection, preservation of existing folders, and
+client-error redaction. They do not access a Kaggle account or fetch the real datasets.
+
 The inline torch loop deliberately supports AdamW, one update per batch and no scheduler;
 unsupported precision/scheduler settings raise an error. It uses BF16 when supported, FP16
 otherwise on CUDA, FP32 on CPU, gradient clipping, global validation, a delivery reserve,
@@ -46,19 +63,24 @@ and winner reference differ at boundaries; the helper exposes the convention and
 than silently using COCO AP. The matching execution test caught and fixed an ambiguous sparse
 matrix length call. No test pseudo-labeling or new external training data path was introduced.
 
-The `kaggle-extra` group contains LightGBM. The notebook group supplies plotting and Jupyter tools.
+The `kaggle-extra` group contains LightGBM and now the official Kaggle client (`kaggle>=2.2,<3`).
+The notebook group supplies plotting and Jupyter tools.
 `pyproject.toml` now selects `dev`, `notebook`, and `kaggle-extra` by default, so plain `uv sync`
 prepares all 14 learning notebooks. Previously, a core/dev sync omitted those tools and removed
 them from the local environment. Extended CV/NLP, tracking, audio and fast-data remain opt-in;
-`uv sync --locked --all-groups` selects every declared group. The existing lockfile already covers
-these groups: regenerating it offline produced no changes. The default-group change introduces
-no new package constraints or versions. A real default sync, a second no-change sync, and
-`uv pip check` passed locally with 161 installed packages. The initial sandboxed installation hit
+`uv sync --locked --all-groups` selects every declared group. The earlier default-group selection
+introduced no package constraints or versions; its default sync and compatibility check passed
+with 161 packages. The download client subsequently added six locked packages (261 in the full
+lockfile), retaining all existing versions. It is also listed in `requirements-colab.txt` for
+manual installation in a copied notebook runtime when missing. The initial sandboxed installation hit
 a Windows launcher-resource permission error; completing the installation with normal local
 permissions succeeded.
 
 Dependency declarations and `uv.lock` were committed separately as `77df1a3`
-as required by AGENTS.md; lesson code and documentation remain available as working-tree changes.
+for the original paired lessons. The download client's dependency declarations, Colab list and
+updated lockfile were committed as `e60b4b7`, as required by AGENTS.md. Notebook code and
+documentation remain available as working-tree changes. Existing optional local tools were
+retained with an all-groups sync using their cached packages; no existing package version changed.
 
 | Exact command | Final result |
 |---|---|
@@ -71,13 +93,16 @@ as required by AGENTS.md; lesson code and documentation remain available as work
 | `uv --cache-dir .uv-cache run --no-sync olp-ai build-notebooks` | Generated all 30 notebooks. |
 | `uv --cache-dir .uv-cache run --no-sync pytest --basetemp .pytest_cache/standalone-final --tb=short` | **105 passed**, one Windows CPU-core fallback warning, 91.51 seconds. |
 | `uv --cache-dir .uv-cache run pytest --basetemp .pytest_cache/default-sync-final --tb=short` | **105 passed**, one Windows CPU-core fallback warning, 172.15 seconds, after the default sync. |
+| `uv --cache-dir .uv-cache run --no-sync pytest --basetemp .pytest_cache/download-final --tb=short` | **113 passed**, one Windows CPU-core fallback warning, 246.18 seconds, with the download cells and optional local tools installed. Optional wandb also printed ignored temporary-folder cleanup permission errors at process exit in the Windows sandbox. |
 | `uv --cache-dir .uv-cache run --no-sync python -m compileall -q src tests scripts notebooks` | Passed. |
-| `uv --cache-dir .uv-cache lock --check` | Passed; 255 packages resolved. |
+| `uv --cache-dir .uv-cache lock --check` | Passed; 261 packages resolved after the Kaggle client addition. |
+| `uv --cache-dir .uv-cache pip check` (after download-client setup) | All 238 installed packages compatible, including the user's existing optional groups. |
+| `uv --cache-dir .uv-cache sync --locked --all-groups --dry-run` | Passed; would make no changes. |
 | `git diff --check` | Passed. |
 | `uv --cache-dir .uv-cache run --no-sync olp-ai practice-data data/learning --task learning` | Created all seven offline schema fixtures. |
 
 Additional verification validates all 14 learning artifacts against the Jupyter schema and checks
-canonical/artifact equality, 11-stage exercise/solution placement, malformed exercise boundaries,
+canonical/artifact equality, 11-stage plus acquisition exercise/solution placement, malformed exercise boundaries,
 execution in separate working folders with both network connections and project imports blocked,
 inline metric fixtures, positive-mask-weight gradients, feature/plot copying,
 and two independent durable bundles. Fresh isolated Python processes (`python -I`) also complete

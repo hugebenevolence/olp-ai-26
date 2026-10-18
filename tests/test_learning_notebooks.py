@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import ast
 import builtins
+import io
 import json
 import os
 import re
 import socket
 import subprocess
 import sys
+import zipfile
 from collections.abc import Sequence
 from html import unescape
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -79,19 +82,20 @@ def _configure(code: str, data: Path, output: Path, runtime: Path) -> str:
     return "".join(lines)
 
 
-def test_seven_pairs_have_eleven_stages_and_collapsed_answers_after_every_baseline_code_cell(
+def test_seven_pairs_have_eleven_stages_plus_optional_download_and_collapsed_answers(
     tmp_path,
 ):
     sources = sorted(LESSONS.glob("*_template.py"))
     assert len(sources) == 14
     split_implementations = set()
+    download_implementations = set()
     for source in sources:
         built = percent_script_to_notebook(source, tmp_path / source.with_suffix(".ipynb").name)
         notebook = json.loads(built.read_text(encoding="utf-8"))
         assert notebook == _notebook(source.name.removesuffix("_template.py"))
         cells = notebook["cells"]
         code_cells = [cell for cell in cells if cell["cell_type"] == "code"]
-        assert len(code_cells) == 11
+        assert len(code_cells) == 12  # Eleven competition stages plus optional acquisition.
         assert len({cell["id"] for cell in cells}) == len(cells)
         for code in _expected_code(notebook):
             compile(code, source.name, "exec")
@@ -99,6 +103,8 @@ def test_seven_pairs_have_eleven_stages_and_collapsed_answers_after_every_baseli
             for node in ast.walk(tree):
                 if isinstance(node, ast.FunctionDef) and node.name == "make_split":
                     split_implementations.add(ast.dump(node, include_attributes=False))
+                if isinstance(node, ast.FunctionDef) and node.name == "download_practice_data":
+                    download_implementations.add(ast.dump(node, include_attributes=False))
                 if isinstance(node, ast.ImportFrom):
                     assert node.level == 0 and not node.module.startswith("olp_ai_26")
                 if isinstance(node, ast.Import):
@@ -127,6 +133,7 @@ def test_seven_pairs_have_eleven_stages_and_collapsed_answers_after_every_baseli
                 "raise NotImplementedError" in "".join(cell["source"]) for cell in code_cells
             )
     assert len(split_implementations) == 1, "Standalone split copies must retain identical guards"
+    assert len(download_implementations) == 1, "Every downloader must retain identical guards"
 
 
 def test_recursive_builder_includes_learning_subdirectory(tmp_path):
@@ -396,7 +403,8 @@ def test_standalone_storage_and_chronological_split_guards(tmp_path):
         ),
         namespace,
     )
-    for node in ast.parse(cells[3]).body:
+    split_cell = next(cell for cell in cells if "def make_split(" in cell)
+    for node in ast.parse(split_cell).body:
         if isinstance(node, (ast.ImportFrom, ast.Import, ast.FunctionDef, ast.ClassDef)):
             exec(
                 compile(ast.Module(body=[node], type_ignores=[]), "inline-split", "exec"), namespace
@@ -426,6 +434,159 @@ def test_standalone_storage_and_chronological_split_guards(tmp_path):
         namespace["sync_artifacts"](output, output / "nested")
     with pytest.raises(ValueError, match="reserve"):
         namespace["TimeBudget"](10, reserve_minutes=10)
+
+
+def _download_lesson(tmp_path: Path, family: str) -> dict:
+    pytest.importorskip("matplotlib")
+    cells = _expected_code(_notebook(f"{family}_baseline"))
+    namespace = {"__name__": "__main__"}
+    exec(
+        compile(
+            _configure(cells[0], tmp_path / "dataset", tmp_path / "output", tmp_path / "runtime"),
+            "download:setup",
+            "exec",
+        ),
+        namespace,
+    )
+    exec(compile(cells[1], "download:disabled-by-default", "exec"), namespace)
+    assert namespace["DOWNLOAD_DATA"] is False
+    return namespace
+
+
+@pytest.mark.parametrize(
+    "family,slug",
+    [
+        ("01_credit", "home-credit-default-risk"),
+        ("02_prices", "house-prices-advanced-regression-techniques"),
+        ("03_toxic", "jigsaw-toxic-comment-classification-challenge"),
+        ("04_leaves", "cassava-leaf-disease-classification"),
+        ("05_salt", "tgs-salt-identification-challenge"),
+        ("06_wheat", "global-wheat-detection"),
+        ("07_matching", "shopee-product-matching"),
+    ],
+)
+def test_optional_download_prepares_original_layout_and_reuses_data_and_cache(
+    tmp_path, monkeypatch, family, slug
+):
+    calls = []
+
+    def fake_cli(command, **options):
+        calls.append(command)
+        assert command[:6] == [sys.executable, "-m", "kaggle", "competitions", "download", slug]
+        assert options["stdin"] == subprocess.DEVNULL and options["capture_output"]
+        assert options["timeout"] == 17 and "shell" not in options
+        cache = Path(command[command.index("--path") + 1])
+        with zipfile.ZipFile(cache / f"{slug}.zip", "w") as outer:
+            for path in pack.rglob("*"):
+                if path.is_file() and "grading" not in path.relative_to(pack).parts:
+                    relative = path.relative_to(pack).as_posix()
+                    if family == "05_salt" and relative.startswith(("train/", "test/")):
+                        continue
+                    if family == "03_toxic" and relative.endswith(".csv"):
+                        payload = io.BytesIO()
+                        with zipfile.ZipFile(payload, "w") as inner:
+                            inner.write(path, relative)
+                        outer.writestr(relative + ".zip", payload.getvalue())
+                    else:
+                        outer.write(path, relative)
+            if family == "05_salt":
+                for split in ("train", "test"):
+                    payload = io.BytesIO()
+                    with zipfile.ZipFile(payload, "w") as inner:
+                        for path in (pack / split).rglob("*"):
+                            if path.is_file():
+                                inner.write(path, path.relative_to(pack / split).as_posix())
+                    outer.writestr(split + ".zip", payload.getvalue())
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_cli)
+    namespace = _download_lesson(tmp_path, family)
+    assert not calls  # Disabled acquisition performs no credential access or subprocess call.
+    assert namespace["KAGGLE_COMPETITION"] == slug
+    for variant in ("baseline", "advanced"):
+        code = _expected_code(_notebook(f"{family}_{variant}"))[1]
+        constants = {
+            node.targets[0].id: ast.literal_eval(node.value)
+            for node in ast.parse(code).body
+            if isinstance(node, ast.Assign)
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id in {"DOWNLOAD_DATA", "KAGGLE_COMPETITION", "EXPECTED_DATA_PATHS"}
+        }
+        assert constants["DOWNLOAD_DATA"] is False
+        assert constants["KAGGLE_COMPETITION"] == slug
+        assert constants["EXPECTED_DATA_PATHS"] == namespace["EXPECTED_DATA_PATHS"]
+    monkeypatch.setitem(namespace, "find_spec", lambda name: object())
+    pack = create_learning_pack(tmp_path / "fixture", family=family)
+    download = namespace["download_practice_data"]
+    destination, cache = namespace["DATA_DIR"], namespace["DOWNLOAD_CACHE"]
+    result = download(
+        slug, destination, cache, namespace["EXPECTED_DATA_PATHS"], timeout_seconds=17
+    )
+    assert result == destination
+    assert len(calls) == 1
+    for path in namespace["EXPECTED_DATA_PATHS"]:
+        assert (destination / path).exists(), path
+    marker = json.loads((destination / ".kaggle-source.json").read_text(encoding="utf-8"))
+    assert marker["competition"] == slug
+    assert not list(destination.rglob("*.zip"))
+    download(slug, destination, cache, namespace["EXPECTED_DATA_PATHS"])
+    assert len(calls) == 1
+    restored = tmp_path / "restored-from-cache"
+    download(slug, restored, cache, namespace["EXPECTED_DATA_PATHS"])
+    assert len(calls) == 1  # A valid cached bundle needs neither credentials nor a client.
+    pd.testing.assert_frame_equal(
+        pd.read_csv(destination / "sample_submission.csv"),
+        pd.read_csv(pack / "sample_submission.csv"),
+    )
+    (destination / "sentinel.txt").write_text("preserve", encoding="utf-8")
+    with pytest.raises(FileExistsError):
+        download("wrong-competition", destination, tmp_path / "other-cache", ("train.csv",))
+    assert (destination / "sentinel.txt").read_text(encoding="utf-8") == "preserve"
+
+
+def test_optional_download_rejects_traversal_missing_layout_and_redacts_client_errors(
+    tmp_path, monkeypatch, capsys
+):
+    namespace = _download_lesson(tmp_path, "02_prices")
+    download = namespace["download_practice_data"]
+    destination, cache = namespace["DATA_DIR"], namespace["DOWNLOAD_CACHE"]
+    slug = namespace["KAGGLE_COMPETITION"]
+    expected = namespace["EXPECTED_DATA_PATHS"]
+    cache.mkdir(parents=True)
+    bundle = cache / f"{slug}.zip"
+    with zipfile.ZipFile(bundle, "w") as archive:
+        archive.writestr("../escaped.txt", "must not escape staging")
+    with pytest.raises(RuntimeError, match="not replaced") as failure:
+        download(slug, destination, cache, expected)
+    assert isinstance(failure.value.__cause__, ValueError)
+    assert not destination.exists() and not (destination.parent / "escaped.txt").exists()
+    with zipfile.ZipFile(bundle, "w") as archive:
+        archive.writestr("unrelated.csv", "not the task schema")
+    with pytest.raises(RuntimeError) as failure:
+        download(slug, destination, cache, expected)
+    assert isinstance(failure.value.__cause__, FileNotFoundError)
+    assert not destination.exists()
+    bundle.unlink()
+    monkeypatch.setitem(namespace, "find_spec", lambda name: None)
+    with pytest.raises(ModuleNotFoundError, match="uv sync"):
+        download(slug, destination, cache, expected)
+    monkeypatch.setitem(namespace, "find_spec", lambda name: object())
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1, stdout="secret-token", stderr="signed-url-with-secret"
+        ),
+    )
+    with pytest.raises(RuntimeError, match="Check credentials") as failure:
+        download(slug, destination, cache, expected)
+    combined = str(failure.value) + str(capsys.readouterr())
+    assert "secret-token" not in combined and "signed-url-with-secret" not in combined
+    assert not destination.exists()
+    with pytest.raises(ValueError, match="separate"):
+        download(slug, destination, destination / "cache", expected)
+    with pytest.raises(ValueError, match="slug"):
+        download("invalid slug; command", destination, cache, expected)
 
 
 def test_positive_mask_weight_changes_loss_and_keeps_ignored_gradient_zero():

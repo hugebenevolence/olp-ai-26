@@ -101,7 +101,9 @@ git diff --check
 ```
 
 Plain `uv sync` installs the core dependencies plus the default `dev`, `notebook`, and
-`kaggle-extra` groups: local checks, Jupyter/plotting, and LightGBM for all 14 learning notebooks.
+`kaggle-extra` groups: local checks, Jupyter/plotting, LightGBM, and the official Kaggle client
+for all 14 learning notebooks. Each learning notebook includes a disabled-by-default dataset
+download cell; see the [dataset guide](docs/LEARNING_DATASETS.md#download-from-a-learning-notebook).
 Use `uv sync --locked` to require the committed lockfile. For a smaller core/dev environment,
 use `uv sync --locked --no-default-groups --group dev`.
 

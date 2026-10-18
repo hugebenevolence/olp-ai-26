@@ -3,7 +3,8 @@
 Make a personal copy of a generated notebook (for example `01_credit_attempt.ipynb`) before
 filling it in. Keep maintained templates unchanged; save your edited attempt with its run bundle.
 
-**Start with the baseline column.** Each baseline has 11 code cells, small marked TODO blocks,
+**Start with the baseline column.** Each baseline has 11 competition stages plus an optional
+dataset-download cell (12 code cells total), small marked TODO blocks,
 and a closed **Reveal expected code** Markdown section immediately after every code cell. Fill
 the gaps, run the cell, inspect the result, and only then reveal the reference. Equivalent correct
 code is welcome. Setup, paths and inspection scaffolding are supplied so the exercise tests the
@@ -16,7 +17,8 @@ checked submission. Advanced notebooks are complete worked examples with the sam
 **All 14 learning notebooks are self-contained.** Copy just one `.ipynb` into a new folder or
 upload it directly to Colab. Its code uses only installed third-party libraries and your data or
 explicitly permitted local model assets. It does not import the project, read another Python file,
-modify the Python search path, install the project, or fetch code or weights. The 16 older
+modify the Python search path, install the project, or fetch code or weights. Data acquisition
+uses the optional online cell; it is disabled during ordinary offline study. The 16 older
 competition-kit notebooks in the parent folder remain repository-assisted references.
 
 | Family and representative dataset | Fill-in baseline | Advanced / SOTA study |
@@ -51,15 +53,17 @@ uv run olp-ai build-notebooks
 ```
 
 The default groups are `dev`, `notebook`, and `kaggle-extra`, so a plain sync includes local
-checks, plotting/Jupyter, and LightGBM. Extended CV/NLP packages, tracking, audio, and fast-data
-remain opt-in; `uv sync --locked --all-groups` installs every declared group if needed.
+checks, plotting/Jupyter, LightGBM, and the official Kaggle client. Extended CV/NLP packages,
+tracking, audio, and fast-data remain opt-in; `uv sync --locked --all-groups` installs every
+declared group if needed.
 The curriculum does not require CatBoost, external tracking, or another training framework.
 
 Those commands maintain this repository; **running a copied learning notebook does not require
 uv, the CLI, or a checkout**. On another prepared environment, install the needed libraries before
 timed offline practice: NumPy, pandas, scikit-learn, matplotlib, PyTorch and Pillow; add torchvision
 for image/mask/box lessons, timm for advanced Cassava or matching, LightGBM for advanced credit,
-and transformers for matching with local text encoders. The feature-cache matching path does not
+and transformers for matching with local text encoders. Add `kaggle>=2.2,<3` only if using the
+optional online download cell. The feature-cache matching path does not
 need transformers or timm. The notebooks perform no automatic installation.
 
 For Colab, upload the individual notebook and edit `DATA_DIR` in stage 1; do not run `uv sync`,
@@ -75,7 +79,15 @@ runtime principles; its repository bootstrap instructions apply to the older kit
 
 Acquire the real practice datasets using [the data staging guide](../../docs/LEARNING_DATASETS.md).
 These are original competition schemas, not notebooks that merely rename a toy pack “Kaggle.”
-No account actions, rules acceptance, dataset download or model-weight download are automated.
+No account actions or rules acceptance are automated. Every notebook now has **stage 1a**:
+set `DOWNLOAD_DATA=True` to fetch its original Kaggle competition data using the official client,
+extract it, and validate the required folder layout. Configure `DATA_DIR` in stage 1 to a dedicated
+empty folder first; existing fixtures/manual data are preserved. Credentials stay in the normal
+Kaggle environment/configuration or hidden input, never saved notebook code. Large datasets need
+space for both the cached bundle and extracted files. A second run reuses a marked completed
+folder; another candidate can reuse the ZIP cache. The download stage resets the training timer
+after preparation. Model weights are never downloaded by this cell. See the
+[download and authentication instructions](../../docs/LEARNING_DATASETS.md#download-from-a-learning-notebook).
 For an offline execution check before real-data practice:
 
 ```powershell
@@ -119,7 +131,7 @@ sections start closed; actual appearance depends on the notebook viewer. Use a r
 supports HTML details, such as JupyterLab, if another viewer displays the solution text expanded.
 Solution cells are additionally tagged `solution`; they are study aids, not hidden-test security.
 
-## The eleven stages
+## The eleven competition stages
 
 1. Bootstrap, local paths, explicit resources and time budget.
 2. Load the original task schema and check prediction-unit IDs.
@@ -132,6 +144,10 @@ Solution cells are additionally tagged `solution`; they are study aids, not hidd
 9. Validate globally, visualize errors and compare justified changes.
 10. Reload and infer the complete test manifest.
 11. Align IDs, validate the actual CSV, save the recipe/report and synchronize artifacts.
+
+The additional stage **1a** acquires data before stage 2 and is skipped by default. It is supplied
+scaffolding rather than another timed algorithm exercise; baseline copies still have a collapsed
+reference immediately after this code cell.
 
 Baseline notebooks intentionally stop at an unfilled block when run unchanged. Automated checks run
 the expected code from their solution cells; advanced notebooks run their actual worked cells.
