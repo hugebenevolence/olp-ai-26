@@ -2,15 +2,25 @@
 
 [Guide index](README.md) · [First practice session](PRACTICE_QUICKSTART.md)
 
-## Before the event
+## Choose the notebook route
+
+**Self-contained learning notebooks:** upload one of the [14 lessons](../notebooks/learning/README.md)
+directly. Install only missing small libraries from `requirements-colab.txt` before practice;
+never replace Colab's torch, torchvision, NumPy or CUDA packages. The notebook installs nothing.
+Configure `DATA_DIR`, `DATA_ARCHIVE` and `PERSISTENT_DIR` in stage 1, then inspect `gpu_report()`.
+Use [stage 1a](LEARNING_DATASETS.md#download-from-a-learning-notebook) only when online download
+is intended; it is disabled by default. No checkout or project bootstrap is needed.
+
+**Repository-assisted kit notebooks:** the setup below applies to the 16 notebooks in
+`notebooks/` outside `learning/`. Keep the checkout at `/content/olp-ai-26`.
+
+## Repository-assisted setup
 
 - Generate every notebook with `uv run olp-ai build-notebooks` and upload/clone the repository to
   `/content/olp-ai-26`.
 - Put immutable input archives on Drive; train from extracted files under `/content/olp_runtime`.
 - Cache only competition-permitted model/tokenizer files and record their licenses and hashes.
 - Execute one small end-to-end run: split, train, validate, infer, validate submission, sync.
-
-## Runtime setup
 
 1. Select a GPU runtime.
 2. Run the bootstrap cell. It adds `src/` to `sys.path` and installs only the notebook's requested
@@ -25,10 +35,13 @@ rehearsal; local tests only inspect the bootstrap's behavior with a simulated re
 
 ## Cold reload and durable artifacts
 
-Each generic task writes into its own output subdirectory. Preserve a whole run before changing
+Each kit task writes into its own output subdirectory; learning candidates use unique run IDs.
+Preserve a whole run before changing
 configuration: fitted pipeline or checkpoint, tokenizer/processor files, label order, thresholds,
 `run.json`, report, submission, and executable notebook/source. Sync the task directory to a
 durable destination outside that directory. Include the final ZIP when the task requests one.
+Save a personal copy of your edited notebook too; an unsaved browser document cannot be captured
+by artifact synchronization. Learning checkpoints back up to their configured durable run folder.
 
 The CPU text and tabular models have `save`/`load` methods. For torch/HF models, construct the
 recorded architecture and preprocessing first, then load the matching state. Reproducing inference

@@ -1,7 +1,7 @@
 # Repository readiness audit — 14 October 2026
 
 **Historical snapshot before repairs.** For the current code and verification boundaries, use
-[implementation status](IMPLEMENTATION_STATUS.md) and the [guide index](README.md).
+[implementation status](../IMPLEMENTATION_STATUS.md) and the [guide index](../README.md).
 
 **Verdict: useful competition foundation, with incomplete task workflows and confirmed correctness risks.**
 The repository is ready to support deliberate practice. It is not yet demonstrated ready for an
@@ -9,7 +9,7 @@ unseen six-hour contest. This assessment covers commit `7515cbc`, source inspect
 checks, and three focused probes. It does not certify live Colab GPU execution or organizer-cloud
 compatibility. No training implementation or existing generated notebook was changed during this audit.
 
-The personal preparation plan is in [15_DAY_PREPARATION.md](15_DAY_PREPARATION.md).
+The personal preparation plan is in [15_DAY_PREPARATION.md](../15_DAY_PREPARATION.md).
 
 ## What already helps
 

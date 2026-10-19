@@ -55,7 +55,7 @@ import shutil
 import sys
 import time
 import zipfile
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from time import perf_counter
@@ -67,9 +67,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
-from PIL import Image
-from torch import nn
-from torch.utils.data import DataLoader
 
 
 def _json_default(value: Any) -> Any:
@@ -121,11 +118,6 @@ def load_pickle(path: Path | str) -> Any:
     """Reload a trusted, locally produced pickle; never load untrusted downloaded pickle files."""
     with Path(path).open("rb") as handle:
         return pickle.load(handle)
-
-
-def save_torch_state(value: Any, path: Path | str) -> Path:
-    """Atomically save torch state without importing torch until this function is used."""
-    return _write(value, path, "torch")
 
 
 @dataclass
@@ -740,7 +732,7 @@ plt.close()
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder, StandardScaler
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 feature_columns = [
     column
@@ -1206,4 +1198,4 @@ pd.DataFrame(
 copied = sync_artifacts(OUTPUT, DURABLE_OUTPUT)
 print("Checked local CSV:", destination, "Durable files copied:", len(copied))
 
-# ruff: noqa: E402, F401
+# ruff: noqa: E402

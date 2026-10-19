@@ -68,7 +68,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
-from PIL import Image
 from torch import nn
 from torch.utils.data import DataLoader
 
@@ -111,17 +110,6 @@ def _write(value: Any, path: Path | str, kind: str) -> Path:
 def save_json(value: Any, path: Path | str) -> Path:
     """Atomically save UTF-8 metadata, including paths, dataclasses, and NumPy values."""
     return _write(value, path, "json")
-
-
-def save_pickle(value: Any, path: Path | str) -> Path:
-    """Atomically save a fitted local pipeline with preprocessing and original label values."""
-    return _write(value, path, "pickle")
-
-
-def load_pickle(path: Path | str) -> Any:
-    """Reload a trusted, locally produced pickle; never load untrusted downloaded pickle files."""
-    with Path(path).open("rb") as handle:
-        return pickle.load(handle)
 
 
 def save_torch_state(value: Any, path: Path | str) -> Path:
@@ -1415,4 +1403,4 @@ pd.DataFrame(
 copied = sync_artifacts(OUTPUT, DURABLE_OUTPUT)
 print("Checked local CSV:", destination, "Durable files copied:", len(copied))
 
-# ruff: noqa: E402, F401
+# ruff: noqa: E402

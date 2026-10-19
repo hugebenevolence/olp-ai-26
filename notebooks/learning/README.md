@@ -52,43 +52,28 @@ uv sync --locked
 uv run olp-ai build-notebooks
 ```
 
-The default groups are `dev`, `notebook`, and `kaggle-extra`, so a plain sync includes local
-checks, plotting/Jupyter, LightGBM, and the official Kaggle client. Extended CV/NLP packages,
-tracking, audio, and fast-data remain opt-in; `uv sync --locked --all-groups` installs every
-declared group if needed.
-The curriculum does not require CatBoost, external tracking, or another training framework.
-
-Those commands maintain this repository; **running a copied learning notebook does not require
-uv, the CLI, or a checkout**. On another prepared environment, install the needed libraries before
+These commands maintain the repository; **a copied notebook needs neither uv nor a checkout**.
+See [local setup](../../README.md#local-setup) for dependency groups. In another environment,
+install the needed libraries before
 timed offline practice: NumPy, pandas, scikit-learn, matplotlib, PyTorch and Pillow; add torchvision
 for image/mask/box lessons, timm for advanced Cassava or matching, LightGBM for advanced credit,
 and transformers for matching with local text encoders. Add `kaggle>=2.2,<3` only if using the
 optional online download cell. The feature-cache matching path does not
 need transformers or timm. The notebooks perform no automatic installation.
 
-For Colab, upload the individual notebook and edit `DATA_DIR` in stage 1; do not run `uv sync`,
-pip-install the project, or replace Colab's torch/NumPy/CUDA stack. The visible `gpu_report()`
-function reports the actual device. Keep training media under `/content/olp_runtime`, using the
-inline folder/ZIP staging option if needed. ZIP contents must have the dataset files at their
-root; otherwise point `DATA_DIR` at the extracted subfolder. Configure `PERSISTENT_DIR` for a
-durable copy under its own run-ID folder. Explicit `/content/drive/` paths trigger the notebook's
-Drive mount function. Classifier/segmenter best checkpoints also back up to that unique folder.
-Save your edited notebook with the output bundle; programmatic copying cannot capture an
-unsaved browser notebook. The [Colab runbook](../../docs/COLAB_RUNBOOK.md) describes storage and
-runtime principles; its repository bootstrap instructions apply to the older kit notebooks.
+For Colab, upload the notebook directly and follow the
+[learning-notebook setup](../../docs/COLAB_RUNBOOK.md#choose-the-notebook-route).
+Set `DATA_DIR` to runtime storage and `PERSISTENT_DIR` to durable storage in stage 1.
+Keep your edited notebook with its unique run bundle. For manual ZIP staging, files must be
+at the ZIP root; otherwise point `DATA_DIR` at the extracted subfolder.
 
-Acquire the real practice datasets using [the data staging guide](../../docs/LEARNING_DATASETS.md).
-These are original competition schemas, not notebooks that merely rename a toy pack “Kaggle.”
-No account actions or rules acceptance are automated. Every notebook now has **stage 1a**:
-set `DOWNLOAD_DATA=True` to fetch its original Kaggle competition data using the official client,
-extract it, and validate the required folder layout. Configure `DATA_DIR` in stage 1 to a dedicated
-empty folder first; existing fixtures/manual data are preserved. Credentials stay in the normal
-Kaggle environment/configuration or hidden input, never saved notebook code. Large datasets need
-space for both the cached bundle and extracted files. A second run reuses a marked completed
-folder; another candidate can reuse the ZIP cache. The download stage resets the training timer
-after preparation. Model weights are never downloaded by this cell. See the
-[download and authentication instructions](../../docs/LEARNING_DATASETS.md#download-from-a-learning-notebook).
-For an offline execution check before real-data practice:
+For real data, follow the [dataset and authentication guide](../../docs/LEARNING_DATASETS.md).
+**Logging in does not start a download:** choose a dedicated empty `DATA_DIR`, then enable
+`DOWNLOAD_DATA=True` in stage 1a. Existing fixtures/manual folders are preserved; completed
+downloads and cached ZIPs can be reused. This optional online stage downloads competition data,
+never model weights. Leave it disabled for offline practice.
+
+To create small offline schema fixtures:
 
 ```powershell
 uv run olp-ai practice-data data/learning --task learning

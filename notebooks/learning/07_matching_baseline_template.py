@@ -55,7 +55,7 @@ import shutil
 import sys
 import time
 import zipfile
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from time import perf_counter
@@ -68,8 +68,6 @@ import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
-from torch import nn
-from torch.utils.data import DataLoader
 
 
 def _json_default(value: Any) -> Any:
@@ -121,11 +119,6 @@ def load_pickle(path: Path | str) -> Any:
     """Reload a trusted, locally produced pickle; never load untrusted downloaded pickle files."""
     with Path(path).open("rb") as handle:
         return pickle.load(handle)
-
-
-def save_torch_state(value: Any, path: Path | str) -> Path:
-    """Atomically save torch state without importing torch until this function is used."""
-    return _write(value, path, "torch")
 
 
 @dataclass
@@ -256,28 +249,6 @@ def gpu_report() -> dict:
         "total_GiB": total / 2**30,
         "precision": "bf16" if torch.cuda.is_bf16_supported() else "fp16",
     }
-
-
-def evaluate_metric(name: str, truth: Any, prediction: Any, **kwargs: Any) -> float:
-    """Only the metrics used in this lesson; task-specific graders appear beside the model."""
-    from sklearn.metrics import accuracy_score, roc_auc_score
-
-    if name == "roc_auc":
-        return float(roc_auc_score(truth, prediction, **kwargs))
-    if name == "accuracy":
-        return float(accuracy_score(truth, prediction))
-    if name == "dice_mean_image":
-        y, p = np.asarray(truth, bool), np.asarray(prediction, bool)
-        if y.shape != p.shape or not y.size:
-            raise ValueError("Need aligned nonempty masks")
-        axes = tuple(range(1, y.ndim))
-        denominator = y.sum(axis=axes) + p.sum(axis=axes)
-        return float(
-            np.divide(
-                2 * (y & p).sum(axis=axes), denominator, out=np.ones(len(y)), where=denominator != 0
-            ).mean()
-        )
-    raise ValueError(f"Unsupported lesson metric: {name}")
 
 
 FAMILY, VARIANT = "07_matching", "baseline"
@@ -758,7 +729,6 @@ print("Training title preview:", tr["title"].head(3).tolist())
 #
 
 # %% [exercise]
-from numpy.typing import ArrayLike
 from sklearn.metrics.pairwise import cosine_similarity
 
 
@@ -1233,4 +1203,4 @@ pd.DataFrame(
 copied = sync_artifacts(OUTPUT, DURABLE_OUTPUT)
 print("Checked local CSV:", destination, "Durable files copied:", len(copied))
 
-# ruff: noqa: E402, F401
+# ruff: noqa: E402

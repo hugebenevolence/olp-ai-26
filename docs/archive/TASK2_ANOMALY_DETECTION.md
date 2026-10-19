@@ -1,6 +1,6 @@
 # Task 2 image anomaly-detection runbook
 
-[Guide index](README.md) · [Current implementation status](IMPLEMENTATION_STATUS.md)
+[Guide index](../README.md) · [Current implementation status](../IMPLEMENTATION_STATUS.md)
 
 **Weight staging update:** current CV helpers do not download weights. In the original task
 template, fill `MODEL_CHECKPOINTS` for every backbone selected by the preset. In the DINO augmented
