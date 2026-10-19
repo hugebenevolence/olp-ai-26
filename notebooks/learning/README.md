@@ -3,16 +3,30 @@
 Make a personal copy of a generated notebook (for example `01_credit_attempt.ipynb`) before
 filling it in. Keep maintained templates unchanged; save your edited attempt with its run bundle.
 
-**Start with the baseline column.** Each baseline has 11 competition stages plus an optional
-dataset-download cell (12 code cells total), small marked TODO blocks,
-and a closed **Reveal expected code** Markdown section immediately after every code cell. Fill
-the gaps, run the cell, inspect the result, and only then reveal the reference. Equivalent correct
-code is welcome. Setup, paths and inspection scaffolding are supplied so the exercise tests the
-important decisions rather than repetitive imports.
+**Start with the baseline column.** Each baseline has **eight focused exercises**, two levels
+of expandable hints, nearby executable checks, and interpretation questions. The eleven competition
+stages remain, plus optional dataset acquisition; each stage now contains several small cells.
+Every baseline code cell still has a closed **Reveal expected code** reference immediately after it.
+Attempt an exercise, run its checks, explain the result, then consult the reference if needed.
+Equivalent correct implementations are welcome.
+
+| Cell type | What you do |
+|---|---|
+| Supplied helper | Run it; its code is folded where supported. Storage/safety plumbing is supplied. |
+| Configuration | Edit paths, resources, model permission and task settings. |
+| Exercise | Complete the named function or marked operation using its input/output contract. |
+| Check | Predict the outcome, run the assertions and fix the first failure. |
+| Worked component | Follow an implemented step, then explain why it fits the task. |
+
+The learning rhythm is **understand → implement → check → interpret → reuse**. Small checks cover
+unseen categories, log-price conventions, multilabel averaging, optimizer updates, mask geometry,
+checkpoint selection, set matching and shuffled submission IDs. Actual batch checks precede neural
+training. After each stage, write your answer to **Stop and explain** before opening its checkpoint.
 
 Every pair includes inspection plots, a leakage-aware split, a training-fold imbalance audit and
 response, model/loss reasoning, validation errors, score/runtime records, reload, inference and a
-checked submission. Advanced notebooks are complete worked examples with the same data contract.
+checked submission. Advanced notebooks use explained worked components, checks and a controlled
+comparison task with the same data contract. They remain complete implementations.
 
 **All 14 learning notebooks are self-contained.** Copy just one `.ipynb` into a new folder or
 upload it directly to Colab. Its code uses only installed third-party libraries and your data or
@@ -96,8 +110,9 @@ recorded IDs. For new private inputs, retain the actual encoders/tokenizer/confi
 ## How to learn from each pair
 
 1. **Attempt:** read the task and inspection output. Write your metric, split and imbalance decision.
-   Fill the baseline blocks before expanding a solution. Aim for 45–60 minutes to the first complete
-   small-pack route; treat a missed target as information about the next drill.
+   Implement one exercise and run its checks before moving on. Use Hint 1, then Hint 2 before the
+   full reference. The first guided study may take longer; aim for 45–60 minutes to a complete
+   small-pack route during the later reconstruction drill.
 2. **Explain:** after each reveal, describe why the reference works and why a plausible alternative
    would fail. Investigate differing predictions rather than copying until the cell turns green.
 3. **Compare:** run the advanced notebook on the same source pack and folds. Keep its new candidate
@@ -140,6 +155,7 @@ Sources are the adjacent `*_template.py` files. Regenerate artifacts after editi
 `uv run olp-ai build-notebooks`; never hand-edit generated notebooks as the maintained source.
 All runtime helpers are visible inside those sources and generated cells. Inline definitions are
 intentional for these lessons; changing a package helper does not update the standalone copies.
+See the [lesson design contract](../../docs/LEARNING_NOTEBOOK_DESIGN.md) before editing the sources.
 Regression checks execute every completed lesson outside the repository working directory with
 project imports and network connections blocked. Fresh-process checks cover table and image
 routes as well. Baselines still require you to fill their exercises before ordinary Run All works.

@@ -10,10 +10,10 @@
 # task](https://www.kaggle.com/competitions/tgs-salt-identification-challenge) · [Primary
 # solution evidence](https://github.com/ybabakhin/kaggle_salt_bes_phalanx)
 #
-# The winning repository and authors' paper describe encoder-decoder ensembles and
-# semi-supervised training. This lesson isolates skip-connected segmentation and threshold
-# selection. It omits pseudo-labeling and large pretrained ensembles; it is not an exact winner
-# reproduction.
+# The linked winning repository describes encoder-decoder ensembles and semi-supervised training.
+# This baseline uses a small dense predictor with BCE. The advanced companion studies ResNet34
+# U-Net, mixed Dice/BCE and validation threshold selection, without pseudo-labeling or the winning
+# ensemble.
 #
 # **Watch for:** TGS is neither Dice nor continuous IoU. Restore the original 101x101 dimensions
 # before scoring and column-major RLE.
@@ -28,26 +28,47 @@
 # weights or real Kaggle data are bundled. Keep grading answers closed. Use only explicitly
 # permitted resources. Internet/prepared-code access is not assumed on contest day.
 #
-# Fill only the TODO blocks. Every code cell is followed by a closed Reveal expected code
-# section. Attempt, run, then reveal; equivalent correct implementations are welcome. Record
-# hints needed. Setup/configuration is supplied.
+# Complete the named exercises and their nearby checks in order. Setup and safety helpers are
+# supplied.
 #
 # After the lesson, close both notebooks and rebuild the essential route from memory. See the
 # repository's blank-notebook playbook for the final transfer test.
 #
+# ## How to use this lesson
+#
+# Complete one named exercise, run its nearby checks, then interpret the result. Supplied cells
+# contain setup or integration; edit only configuration or marked exercise bodies. Every baseline
+# code cell retains a collapsed full reference immediately afterward. Use Hint 1, then Hint 2,
+# before opening a reference.
+#
+# By the end you should be able to state the data/metric contract, choose a legal split, construct
+# one correct model input, validate a saved candidate and deliver an ID-aligned file. Mini-checks
+# use tiny separate examples or the current training batch; they do not certify real-data quality.
+#
+#  | Stage | Goal |
+# |---|---|
+# | 1 | Environment and configuration |
+# | 1a | Optional dataset acquisition |
+# | 2 | Understand and load the data contract |
+# | 3 | Inspect examples and distributions |
+# | 4 | Build and test the validation split |
+# | 5 | Measure imbalance and choose a response |
+# | 6 | Build features or one correct batch |
+# | 7 | Connect outputs, loss and official metric |
+# | 8 | Train and preserve a recoverable candidate |
+# | 9 | Interpret validation and compare experiments |
+# | 10 | Reload and infer every test item |
+# | 11 | Deliver and verify the submission |
 
 # %% [markdown]
-# ## 1. Bootstrap and configuration
+# ## 1. Environment and configuration
 #
-# Run this supplied setup cell; edit only configuration values. Later algorithm cells contain
-# TODO blocks. No weights are fetched. The next optional cell can acquire practice data;
-# otherwise stage local data before repeated reads.
-# Each candidate gets a new output directory.
-#
-#
-#
+# Run the supplied imports and runtime helpers in order. Edit paths, time budget and model policy
+# in the configuration cells. Inspect the actual device; CPU checks cannot establish GPU
+# throughput. Supplied storage/safety definitions are folded where the viewer supports it: run
+# them, but reconstruct the short algorithmic functions during closed-book practice.
 
-# %% [exercise]
+# %% [provided] [stage-1]
 import json
 import pickle
 import random
@@ -67,56 +88,20 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
+from numpy.typing import ArrayLike
 from PIL import Image
 from torch import nn
 from torch.utils.data import DataLoader
 
+# ruff: noqa: E402
 
-def _json_default(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if is_dataclass(value):
-        return asdict(value)
-    if hasattr(value, "tolist"):
-        return value.tolist()
-    raise TypeError(f"Cannot serialize {type(value).__name__} as JSON")
+# %% [markdown]
+# ### Supplied helper — `CompetitionConfig`
+#
+# Explicit notebook state; no installed project is required.
 
 
-def _write(value: Any, path: Path | str, kind: str) -> Path:
-    destination = Path(path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
-    try:
-        if kind == "json":
-            temporary.write_text(
-                json.dumps(
-                    value, default=_json_default, indent=2, ensure_ascii=False, allow_nan=False
-                ),
-                encoding="utf-8",
-            )
-        elif kind == "pickle":
-            with temporary.open("wb") as handle:
-                pickle.dump(value, handle, protocol=pickle.HIGHEST_PROTOCOL)
-        else:
-            import torch
-
-            torch.save(value, temporary)
-        temporary.replace(destination)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return destination
-
-
-def save_json(value: Any, path: Path | str) -> Path:
-    """Atomically save UTF-8 metadata, including paths, dataclasses, and NumPy values."""
-    return _write(value, path, "json")
-
-
-def save_torch_state(value: Any, path: Path | str) -> Path:
-    """Atomically save torch state without importing torch until this function is used."""
-    return _write(value, path, "torch")
-
-
+# %% [provided] [stage-1]
 @dataclass
 class CompetitionConfig:
     """Explicit notebook state; no installed project is required."""
@@ -146,6 +131,13 @@ class CompetitionConfig:
         return {**asdict(self), "data_dir": str(self.data_dir), "output_dir": str(self.output_dir)}
 
 
+# %% [markdown]
+# ### Supplied helper — `TimeBudget`
+#
+# Leave delivery time available; a running batch/fit cannot be interrupted safely.
+
+
+# %% [provided] [stage-1]
 class TimeBudget:
     """Leave delivery time available; a running batch/fit cannot be interrupted safely."""
 
@@ -163,6 +155,13 @@ class TimeBudget:
             raise TimeoutError(f"Delivery reserve reached before {stage}")
 
 
+# %% [markdown]
+# ### Supplied helper — `runtime_paths`
+#
+# Media stays on local disk; optional durable storage is an explicit destination.
+
+
+# %% [provided] [stage-1]
 def runtime_paths(
     *, runtime_dir: Path | None = None, persistent_dir: Path | None = None
 ) -> SimpleNamespace:
@@ -182,6 +181,13 @@ def runtime_paths(
     )
 
 
+# %% [markdown]
+# ### Supplied helper — `mount_google_drive`
+#
+# Call only when an explicitly configured Colab path uses Drive.
+
+
+# %% [provided] [stage-1]
 def mount_google_drive() -> None:
     """Call only when an explicitly configured Colab path uses Drive."""
     from google.colab import drive
@@ -189,6 +195,13 @@ def mount_google_drive() -> None:
     drive.mount("/content/drive")
 
 
+# %% [markdown]
+# ### Supplied helper — `stage_data`
+#
+# Copy a folder or extract a ZIP once, then train from the local destination.
+
+
+# %% [provided] [stage-1]
 def stage_data(source: Path | str, destination: Path | str) -> Path:
     """Copy a folder or extract a ZIP once, then train from the local destination."""
     source, destination = Path(source).resolve(), Path(destination).resolve()
@@ -208,32 +221,13 @@ def stage_data(source: Path | str, destination: Path | str) -> Path:
     return destination
 
 
-def sync_artifacts(source: Path | str, destination: Path | str | None) -> list[Path]:
-    """Copy the entire candidate, including encoders, preserving separate run folders."""
-    if destination is None:
-        return []
-    source, destination = Path(source).resolve(), Path(destination).resolve()
-    if (
-        destination == source
-        or destination.is_relative_to(source)
-        or source.is_relative_to(destination)
-    ):
-        raise ValueError("Output and backup folders must be separate")
-    copied = []
-    for path in source.rglob("*"):
-        if path.is_file() and not path.name.endswith(".tmp"):
-            target = destination / path.relative_to(source)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
-            try:
-                shutil.copy2(path, temporary)
-                temporary.replace(target)
-            finally:
-                temporary.unlink(missing_ok=True)
-            copied.append(target)
-    return copied
+# %% [markdown]
+# ### Supplied helper — `gpu_report`
+#
+# Inspect the actual runtime before choosing image size, batch size or precision.
 
 
+# %% [provided] [stage-1]
 def gpu_report() -> dict:
     """Inspect the actual runtime before choosing image size, batch size or precision."""
     if not torch.cuda.is_available():
@@ -247,45 +241,15 @@ def gpu_report() -> dict:
     }
 
 
-def evaluate_metric(name: str, truth: Any, prediction: Any, **kwargs: Any) -> float:
-    """Only the metrics used in this lesson; task-specific graders appear beside the model."""
-    from sklearn.metrics import accuracy_score, roc_auc_score
+# %% [markdown]
+# ### Configure this run
+#
+# Edit these values before proceeding. DATA_DIR points at your staged pack; choose a separate
+# empty folder for an online download. Keep model permission explicit, start with a small row/time
+# budget, and let the actual device report guide neural batch size. Each run writes to a new
+# candidate directory.
 
-    if name == "roc_auc":
-        return float(roc_auc_score(truth, prediction, **kwargs))
-    if name == "accuracy":
-        return float(accuracy_score(truth, prediction))
-    if name == "dice_mean_image":
-        y, p = np.asarray(truth, bool), np.asarray(prediction, bool)
-        if y.shape != p.shape or not y.size:
-            raise ValueError("Need aligned nonempty masks")
-        axes = tuple(range(1, y.ndim))
-        denominator = y.sum(axis=axes) + p.sum(axis=axes)
-        return float(
-            np.divide(
-                2 * (y & p).sum(axis=axes), denominator, out=np.ones(len(y)), where=denominator != 0
-            ).mean()
-        )
-    raise ValueError(f"Unsupported lesson metric: {name}")
-
-
-@torch.inference_mode()
-def predict_logits(model: nn.Module, loader: Iterable, *, device: str = "cpu") -> np.ndarray:
-    """Ordered, deterministic inference; BF16/FP16 on capable CUDA, FP32 on CPU."""
-    model.to(device).eval()
-    enabled = torch.device(device).type == "cuda"
-    dtype = torch.bfloat16 if enabled and torch.cuda.is_bf16_supported() else torch.float16
-    outputs = []
-    for batch in loader:
-        inputs = batch[0] if isinstance(batch, (tuple, list)) else batch
-        with torch.autocast(torch.device(device).type, dtype=dtype, enabled=enabled):
-            logits = model(inputs.to(device))
-        outputs.append(logits.float().cpu().numpy())
-    if not outputs:
-        raise ValueError("Inference loader is empty")
-    return np.concatenate(outputs)
-
-
+# %% [configuration] [stage-1]
 FAMILY, VARIANT = "05_salt", "baseline"
 DATA_ARCHIVE, PERSISTENT_DIR = None, None
 if "google.colab" in sys.modules and any(
@@ -308,15 +272,21 @@ SEED, MAX_ROWS, IMAGE_SIZE, BATCH_SIZE, EPOCHS = 42, 6000, 128, 16, 3
 TIME_BUDGET_MINUTES, DELIVERY_RESERVE_MINUTES = 60, 10
 GROUP_COLUMN, TIME_COLUMN = None, None
 USE_IMBALANCE_WEIGHTS = False
-USE_HISTORY_FEATURES = False
-MODEL_NAME = "resnet18"
+MODEL_NAME = "dense_mask_cnn"
 IMAGE_SUFFIX = ".png"
-TEXT_MODEL_DIR, IMAGE_MODEL_CHECKPOINT, EMBEDDING_ARCHIVE = None, None, None
+
+# %% [markdown]
+# ### Configure this run
+#
+# Edit these values before proceeding. DATA_DIR points at your staged pack; choose a separate
+# empty folder for an online download. Keep model permission explicit, start with a small row/time
+# budget, and let the actual device report guide neural batch size. Each run writes to a new
+# candidate directory.
+
+# %% [configuration] [stage-1]
 ASSET_PROVENANCE = (
     ""  # exact asset/version/license; required when enabling local pretrained features
 )
-EMBEDDING_PATH, EMBEDDING_DIM, MAX_LENGTH = None, 64, 128
-THRESHOLD_GRID = (0.3, 0.4, 0.5, 0.6, 0.7)
 competition = CompetitionConfig(
     data_dir=DATA_DIR,
     output_dir=OUTPUT,
@@ -331,11 +301,12 @@ print(gpu_report())
 print("Local data:", DATA_DIR, "New candidate:", OUTPUT)
 
 # %% [markdown]
-# ## 1a. Download the practice dataset (optional, before the timed exercise)
+# ## 1a. Optional dataset acquisition
 #
 # The cell is skipped by default. For online preparation, first accept this competition's
 # rules on its Kaggle page and configure credentials using the
-# [official authentication guide](https://github.com/Kaggle/kaggle-cli/blob/main/docs/README.md#authentication).
+# [official authentication
+# guide](https://github.com/Kaggle/kaggle-cli/blob/main/docs/README.md#authentication).
 # Set DOWNLOAD_DATA=True below. Local uv sync includes the official Kaggle client. In a copied
 # notebook/Colab runtime without it, install only `kaggle>=2.2,<3` before running this cell;
 # do not install this project or replace Colab's torch/NumPy/CUDA stack.
@@ -351,9 +322,71 @@ print("Local data:", DATA_DIR, "New candidate:", OUTPUT)
 # checks the expected layout. On Kaggle itself, attach competition data in the notebook UI,
 # point DATA_DIR at its mounted folder, and leave this switch off. For restricted-room drills,
 # prepare data beforehand and keep this cell disabled. The training timer restarts afterward.
-#
 
-# %% [exercise]
+# %% [markdown]
+# ### Supplied helper — `_json_default`
+#
+# Run this supplied definition before its callers. Its inputs and invariants are explained in this
+# section.
+
+
+# %% [provided] [stage-1a]
+def _json_default(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if is_dataclass(value):
+        return asdict(value)
+    if hasattr(value, "tolist"):
+        return value.tolist()
+    raise TypeError(f"Cannot serialize {type(value).__name__} as JSON")
+
+
+# %% [markdown]
+# ### Supplied helper — `_write`
+#
+# Run this supplied definition before its callers. Its inputs and invariants are explained in this
+# section.
+
+
+# %% [provided] [stage-1a]
+def _write(value: Any, path: Path | str, kind: str) -> Path:
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
+    try:
+        if kind == "json":
+            temporary.write_text(
+                json.dumps(
+                    value, default=_json_default, indent=2, ensure_ascii=False, allow_nan=False
+                ),
+                encoding="utf-8",
+            )
+        elif kind == "pickle":
+            with temporary.open("wb") as handle:
+                pickle.dump(value, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        else:
+            import torch
+
+            torch.save(value, temporary)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
+
+
+# %% [markdown]
+# ### Supplied helper — `save_json`
+#
+# Atomically save UTF-8 metadata, including paths, dataclasses, and NumPy values.
+
+
+# %% [provided] [stage-1a]
+def save_json(value: Any, path: Path | str) -> Path:
+    """Atomically save UTF-8 metadata, including paths, dataclasses, and NumPy values."""
+    return _write(value, path, "json")
+
+
+# %% [configuration] [stage-1a]
 import os
 import subprocess
 from getpass import getpass
@@ -372,7 +405,13 @@ DOWNLOAD_CACHE = DATA_DIR.parent / "_downloads" / KAGGLE_COMPETITION
 DOWNLOAD_TIMEOUT_SECONDS = 7200
 PROMPT_FOR_KAGGLE_TOKEN = "google.colab" in sys.modules
 
+# %% [markdown]
+# ### Supplied helper — `extract_dataset_zip`
+#
+# Extract data without allowing absolute paths, traversal or silent overwrites.
 
+
+# %% [provided] [stage-1a]
 def extract_dataset_zip(source: Path, destination: Path) -> None:
     """Extract data without allowing absolute paths, traversal or silent overwrites."""
     destination = Path(destination).resolve()
@@ -394,6 +433,13 @@ def extract_dataset_zip(source: Path, destination: Path) -> None:
                 shutil.copyfileobj(incoming, outgoing)
 
 
+# %% [markdown]
+# ### Supplied helper — `download_practice_data`
+#
+# Use the official CLI, then publish the complete extracted folder by renaming it.
+
+
+# %% [provided] [stage-1a]
 def download_practice_data(
     competition: str,
     destination: Path,
@@ -507,6 +553,7 @@ def download_practice_data(
     return destination
 
 
+# %% [provided] [stage-1a]
 if DOWNLOAD_DATA:
     if DATA_ARCHIVE is not None:
         raise ValueError("Choose either DATA_ARCHIVE staging or DOWNLOAD_DATA, then rerun setup")
@@ -522,19 +569,20 @@ source_marker = DATA_DIR / ".kaggle-source.json"
 if source_marker.is_file():
     save_json(json.loads(source_marker.read_text(encoding="utf-8")), OUTPUT / "data_source.json")
 print("Download enabled:", DOWNLOAD_DATA, "Dataset folder:", DATA_DIR)
-# Dataset acquisition is preparation time, not part of the measured training/delivery budget.
 budget = TimeBudget(TIME_BUDGET_MINUTES, reserve_minutes=DELIVERY_RESERVE_MINUTES)
 
 # %% [markdown]
-# ## 2. Load data and enforce the contract
+# ## 2. Understand and load the data contract
 #
-# Check schema and identity before fitting. A row is not always a prediction unit: detection has
-# several annotation rows per image, and matching has several records per product.
+# Predict one binary salt mask per image and encode it as column-major RLE. Empty masks are valid.
+# Train at a small resolution if needed, but restore probabilities to each original image size
+# before official scoring or encoding.
 #
-#
-#
+# Read the first rows, column names and actual shapes below. Expected: unique nonempty prediction
+# IDs; matching test/sample ID sets; a target schema that agrees with the official output. Dataset
+# size depends on your local files and MAX_ROWS.
 
-# %% [exercise]
+# %% [worked] [stage-2]
 ID_COLUMN, TARGET_COLUMNS = "id", ["rle_mask"]
 train = pd.read_csv(DATA_DIR / "train.csv", converters={ID_COLUMN: str})
 sample = pd.read_csv(DATA_DIR / "sample_submission.csv", converters={ID_COLUMN: str})
@@ -543,15 +591,22 @@ train["image"] = "train/images/" + train[ID_COLUMN] + ".png"
 train["mask"] = "train/masks/" + train[ID_COLUMN] + ".png"
 test["image"] = "test/images/" + test[ID_COLUMN] + ".png"
 
+# %% [markdown]
+# ### Worked component — `read_mask`
+#
+# Run this supplied definition before its callers. Its inputs and invariants are explained in this
+# section.
 
+
+# %% [worked] [stage-2]
 def read_mask(path):
     with Image.open(DATA_DIR / path) as image:
         return np.asarray(image.convert("L")) > 0
 
 
+# %% [worked] [stage-2]
 train["_coverage"] = [read_mask(path).mean() for path in train["mask"]]
 train["_has_salt"] = (train["_coverage"] > 0).astype(int)
-
 if MAX_ROWS is not None and len(train) > MAX_ROWS:
     train = train.sample(n=MAX_ROWS, random_state=SEED).reset_index(drop=True)
 for name, frame in (("train", train), ("test", test), ("sample", sample)):
@@ -567,19 +622,35 @@ assert sample.columns.tolist() == [ID_COLUMN, *TARGET_COLUMNS]
 print(train.head(3).to_string(index=False))
 print("Shapes:", train.shape, test.shape, sample.shape)
 
-# %% [markdown]
-# ## 3. Inspect and visualize the data
-#
-# Write down three observations from these plots before revealing any solution: missingness,
-# examples that look wrong, and a possible leakage unit. Never select experiments using hidden
-# test labels.
-#
-# Mask coverage exposes two imbalances: empty images versus nonempty images, and background
-# pixels versus foreground pixels. Inspect both; a high background pixel accuracy would be
-# misleading.
-#
+# %% [check] [stage-2]
+assert len(train) > 0 and len(test) == len(sample)
+assert train[ID_COLUMN].is_unique and sample[ID_COLUMN].is_unique
+print("Data-contract checks passed: prediction units and sample coverage.")
 
-# %% [exercise]
+# %% [markdown]
+# ### Stop and explain
+#
+# What is the prediction unit, and which columns may enter the model?
+#
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
+#
+# Predict one binary salt mask per image and encode it as column-major RLE. Empty masks are valid.
+# Train at a small resolution if needed, but restore probabilities to each original image size
+# before official scoring or encoding.
+#
+# </details>
+
+# %% [markdown]
+# ## 3. Inspect examples and distributions
+#
+# Inspect the plotted examples before selecting a model. Write observations before reading the
+# next section.
+#
+# How many masks are empty? How much foreground do nonempty masks contain? Are masks aligned with
+# image geometry, and what happens to thin structures when resizing?
+
+# %% [worked] [stage-3]
 fig, axes = plt.subplots(2, 4, figsize=(12, 6))
 for column, (_, row) in enumerate(train.head(4).iterrows()):
     with Image.open(DATA_DIR / row["image"]) as image:
@@ -596,19 +667,36 @@ print("Empty fraction:", (train["_coverage"] == 0).mean())
 print("Coverage quantiles:", train["_coverage"].quantile([0, 0.25, 0.5, 0.75, 1]).to_dict())
 
 # %% [markdown]
-# ## 4. Freeze a leakage-aware split
+# ### Stop and explain
 #
-# Keep these exact folds for baseline/advanced comparisons. Random stratification is only
-# appropriate for independent samples. Set a group or time column when the acquisition process
-# demands it; assert the chosen boundary.
+# Record three observations: one distribution issue, one suspicious example, and one possible
+# leakage source. What experiment does each justify?
 #
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
 #
+# Use the actual plots and rows; there is no fixed answer independent of your pack. Convert each
+# observation into a falsifiable check before spending training time.
 #
+# </details>
 
-# %% [exercise]
+# %% [markdown]
+# ## 4. Build and test the validation split
+#
+# Preserve empty/nonempty support while honoring acquisition identities or depth/time constraints.
+# One image and its mask form one prediction unit. Keep the same original-resolution validation
+# masks across all comparisons.
+
+# %% [worked] [stage-4]
 from sklearn.model_selection import GroupShuffleSplit, StratifiedGroupKFold, train_test_split
 
+# %% [markdown]
+# ### Supplied helper — `SplitResult`
+#
+# Training/validation tables plus their original positional indexes.
 
+
+# %% [provided] [stage-4]
 @dataclass(slots=True)
 class SplitResult:
     """Training/validation tables plus their original positional indexes."""
@@ -619,6 +707,14 @@ class SplitResult:
     valid_indices: np.ndarray
 
 
+# %% [markdown]
+# ### Supplied helper — `_stratification_key`
+#
+# Run this supplied definition before its callers. Its inputs and invariants are explained in this
+# section.
+
+
+# %% [provided] [stage-4]
 def _stratification_key(frame: pd.DataFrame, targets: Sequence[str]) -> pd.Series:
     if not targets:
         raise ValueError("At least one target is required for stratification")
@@ -627,6 +723,13 @@ def _stratification_key(frame: pd.DataFrame, targets: Sequence[str]) -> pd.Serie
     return frame[list(targets)].astype(str).agg("|".join, axis=1)
 
 
+# %% [markdown]
+# ### Supplied helper — `make_split`
+#
+# Create a deterministic holdout with leakage-aware group and time options.
+
+
+# %% [provided] [stage-4]
 def make_split(
     frame: pd.DataFrame,
     *,
@@ -697,17 +800,75 @@ def make_split(
     )
 
 
-# >>> exercise: preserve empty/nonempty support while honoring any acquisition groups
-split = make_split(
-    train,
-    target_columns="_has_salt",
-    group_column=GROUP_COLUMN,
-    time_column=TIME_COLUMN,
-    seed=SEED,
-    valid_size=0.2,
+# %% [markdown]
+# ### Exercise 1 — `create_holdout`
+#
+# Input: a row-per-prediction table and its actual leakage columns. Return: the split record and
+# independent training/validation copies. The union must retain all rows; identities must not
+# cross folds.
+#
+# <details>
+# <summary>Hint 1 — choose the operation</summary>
+#
+# Preserve empty/nonempty support while honoring acquisition identities or depth/time constraints.
+# One image and its mask form one prediction unit. Keep the same original-resolution validation
+# masks across all comparisons.
+#
+# </details>
+#
+# <details>
+# <summary>Hint 2 — implementation direction</summary>
+#
+# Use make_split with valid_size=0.2; return copies of its train and valid tables.
+#
+# </details>
+
+
+# %% [exercise] [stage-4]
+def create_holdout(
+    frame: pd.DataFrame,
+    target_columns: Any = None,
+    group_column: str | None = None,
+    time_column: str | None = None,
+    seed: int = 42,
+) -> Any:
+    """Input: a row-per-prediction table and its actual leakage columns. Return: the split
+    record and independent training/validation copies. The union must retain all rows;
+    identities must not cross folds.
+    """
+    # >>> exercise: implement create_holdout using the stated contract
+    split = make_split(
+        frame,
+        target_columns=target_columns,
+        group_column=group_column,
+        time_column=time_column,
+        valid_size=0.2,
+        seed=seed,
+    )
+    tr, va = split.train.copy(), split.valid.copy()
+    # <<< exercise
+    return split, tr, va
+
+
+# %% [markdown]
+# **Check before continuing.** Predict the result, run the small test below, and use its assertion
+# message to locate an error. Expected: all assertions pass and the printed success message
+# appears. These checks do not fit the real candidate.
+
+# %% [check] [stage-4]
+toy_frame = pd.DataFrame({"id": range(12), "group": np.repeat(range(6), 2)})
+toy_split, toy_train, toy_valid = create_holdout(toy_frame, group_column="group", seed=7)
+assert len(toy_train) + len(toy_valid) == 12, "The split must retain every row"
+assert not set(toy_train["group"]) & set(toy_valid["group"]), "Repeated identities leaked"
+assert not set(toy_split.train_indices) & set(toy_split.valid_indices)
+toy_again = create_holdout(toy_frame, group_column="group", seed=7)[0]
+np.testing.assert_array_equal(toy_split.valid_indices, toy_again.valid_indices)
+print("Split checks passed: complete, group-disjoint and reproducible.")
+
+# %% [worked] [stage-4]
+split, tr, va = create_holdout(
+    train, target_columns="_has_salt", group_column=GROUP_COLUMN, time_column=TIME_COLUMN, seed=SEED
 )
-tr, va = split.train.copy(), split.valid.copy()
-# <<< exercise
 assert not set(tr[ID_COLUMN]) & set(va[ID_COLUMN])
 if GROUP_COLUMN:
     assert not set(tr[GROUP_COLUMN]) & set(va[GROUP_COLUMN])
@@ -715,26 +876,88 @@ if TIME_COLUMN:
     assert pd.to_datetime(tr[TIME_COLUMN]).max() < pd.to_datetime(va[TIME_COLUMN]).min()
 print("Validation empty/nonempty:", va["_has_salt"].value_counts().to_dict())
 
-# %% [markdown]
-# ## 5. Audit imbalance and choose a response
-#
-# Measure prevalence on the training fold. Choose the response according to the official score:
-# class weights, positive weights, coverage sampling or a log target are hypotheses. Compare
-# with the unweighted candidate on the same split. Never rebalance validation.
-#
-# The optional response weights positive pixels in BCE. Compare weighted versus unweighted runs
-# on these same validation masks. Dice in the advanced model is another training surrogate;
-# neither training loss replaces the TGS evaluator.
-#
+# %% [check] [stage-4]
+assert len(tr) > 0 and len(va) > 0
+assert not set(tr[ID_COLUMN]) & set(va[ID_COLUMN])
+print("Actual-fold checks passed: nonempty disjoint prediction IDs.")
 
-# %% [exercise]
-# >>> exercise: compute pixel imbalance only from the training masks
-positive = sum(read_mask(path).sum() for path in tr["mask"])
-total = sum(read_mask(path).size for path in tr["mask"])
-if positive == 0:
-    raise ValueError("No foreground training pixels: inspect the split and supervision")
-pixel_weight = torch.tensor((total - positive) / positive, dtype=torch.float32)
-# <<< exercise
+# %% [markdown]
+# ### Stop and explain
+#
+# Would a random row split measure the generalization you need here? Identify the boundary that
+# would leak information.
+#
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
+#
+# Preserve empty/nonempty support while honoring acquisition identities or depth/time constraints.
+# One image and its mask form one prediction unit. Keep the same original-resolution validation
+# masks across all comparisons.
+#
+# </details>
+
+# %% [markdown]
+# ## 5. Measure imbalance and choose a response
+#
+# Foreground pixels can be rare even when many images contain salt. Count positive and negative
+# pixels from training masks only. A training fold with no foreground is a supervision problem,
+# not a reason to invent a weight.
+#
+# $w_+=N_{background}/N_{foreground}$. TGS averages strict IoU-threshold hits over images, with
+# both-empty IoU=1; it is not pixel Dice.
+
+# %% [markdown]
+# ### Exercise 2 — `foreground_weight`
+#
+# Input: training mask paths only. Return: background/foreground scalar weight, foreground count
+# and total pixels. Reject a fold with no foreground.
+#
+# <details>
+# <summary>Hint 1 — choose the operation</summary>
+#
+# Foreground pixels can be rare even when many images contain salt. Count positive and negative
+# pixels from training masks only. A training fold with no foreground is a supervision problem,
+# not a reason to invent a weight.
+#
+# </details>
+#
+# <details>
+# <summary>Hint 2 — implementation direction</summary>
+#
+# Count mask pixels rather than foreground images, then divide negative pixels by positive pixels.
+#
+# </details>
+
+
+# %% [exercise] [stage-5]
+def foreground_weight(mask_paths: Sequence[str]) -> Any:
+    """Input: training mask paths only. Return: background/foreground scalar weight, foreground
+    count and total pixels. Reject a fold with no foreground.
+    """
+    # >>> exercise: implement foreground_weight using the stated contract
+    positive = sum(read_mask(path).sum() for path in mask_paths)
+    total = sum(read_mask(path).size for path in mask_paths)
+    if positive == 0:
+        raise ValueError("No foreground training pixels: inspect the split and supervision")
+    pixel_weight = torch.tensor((total - positive) / positive, dtype=torch.float32)
+    # <<< exercise
+    return pixel_weight, positive, total
+
+
+# %% [markdown]
+# **Check before continuing.** Predict the result, run the small test below, and use its assertion
+# message to locate an error. Expected: all assertions pass and the printed success message
+# appears. These checks do not fit the real candidate.
+
+# %% [check] [stage-5]
+toy_mask_paths = tr.loc[tr["_has_salt"].eq(1), "mask"].head(1).tolist()
+toy_weight, toy_positive, toy_total = foreground_weight(toy_mask_paths)
+assert 0 < toy_positive <= toy_total
+np.testing.assert_allclose(toy_weight.item(), (toy_total - toy_positive) / toy_positive, rtol=1e-5)
+print("Foreground checks passed on a nonempty training mask; no validation masks were read.")
+
+# %% [worked] [stage-5]
+pixel_weight, positive, total = foreground_weight(tr["mask"].tolist())
 print("Training positive pixel fraction:", positive / total)
 print(
     "Empty mask fraction:", (tr["_coverage"] == 0).mean(), "Weight enabled:", USE_IMBALANCE_WEIGHTS
@@ -746,22 +969,65 @@ plt.show()
 plt.close()
 
 # %% [markdown]
-# ## 6. Build features or datasets
+# ### Stop and explain
 #
-# Inspect one transformed example or batch. Explain its shape, range, label encoding and
-# train/validation/test consistency. Fitted preprocessing sees the training fold only.
+# Does changing training weights also change the official score or validation distribution? What
+# would justify enabling the response?
 #
-# Training and mask transforms share geometry; masks use nearest-neighbor interpolation in the
-# inline dataset. There is no ImageNet normalization in this scratch route. Inspect image/mask
-# alignment after transforms, not only the raw pair.
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
 #
+# Foreground pixels can be rare even when many images contain salt. Count positive and negative
+# pixels from training masks only. A training fold with no foreground is a supervision problem,
+# not a reason to invent a weight.
+#
+# </details>
 
-# %% [exercise]
+# %% [markdown]
+# ## 6. Build features or one correct batch
+#
+# Read paired image/mask geometry, resize masks with nearest-neighbor sampling and keep evaluation
+# deterministic. The target batch is [B,1,H,W] with values 0/1, not interpolated class fractions.
+
+# %% [markdown]
+# ### Worked component — `predict_logits`
+#
+# Ordered, deterministic inference; BF16/FP16 on capable CUDA, FP32 on CPU.
+
+
+# %% [worked] [stage-6]
+@torch.inference_mode()
+def predict_logits(model: nn.Module, loader: Iterable, *, device: str = "cpu") -> np.ndarray:
+    """Ordered, deterministic inference; BF16/FP16 on capable CUDA, FP32 on CPU."""
+    model.to(device).eval()
+    enabled = torch.device(device).type == "cuda"
+    dtype = torch.bfloat16 if enabled and torch.cuda.is_bf16_supported() else torch.float16
+    outputs = []
+    for batch in loader:
+        inputs = batch[0] if isinstance(batch, (tuple, list)) else batch
+        with torch.autocast(torch.device(device).type, dtype=dtype, enabled=enabled):
+            logits = model(inputs.to(device))
+        outputs.append(logits.float().cpu().numpy())
+    if not outputs:
+        raise ValueError("Inference loader is empty")
+    return np.concatenate(outputs)
+
+
+# %% [worked] [stage-6]
 from torch.utils.data import Dataset
 from torchvision import tv_tensors
 from torchvision.transforms import v2
 
+# %% [markdown]
+# ### Worked component — `SegmentationTableDataset`
+#
+# Read paired RGB images and indexed/binary masks described by a table.
+#
+# The same random transform is applied to the image and mask. Without a mask column the dataset
+# returns only an image tensor, which is suitable for test inference.
 
+
+# %% [worked] [stage-6]
 class SegmentationTableDataset(Dataset[Any]):
     """Read paired RGB images and indexed/binary masks described by a table.
 
@@ -836,6 +1102,14 @@ class SegmentationTableDataset(Dataset[Any]):
         return image, mask
 
 
+# %% [markdown]
+# ### Worked component — `loader_for`
+#
+# Run this supplied definition before its callers. Its inputs and invariants are explained in this
+# section.
+
+
+# %% [worked] [stage-6]
 def loader_for(frame, training=False):
     dataset = SegmentationTableDataset(
         frame,
@@ -849,29 +1123,242 @@ def loader_for(frame, training=False):
     return DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=training, num_workers=0)
 
 
-# >>> exercise: keep validation/test transforms deterministic and mask geometry paired
-train_loader, valid_loader = loader_for(tr, False), loader_for(va)
-# <<< exercise
+# %% [markdown]
+# ### Exercise 3 — `make_loader_pair`
+#
+# Input: disjoint training/validation image records. Return two aligned loaders. Keep validation
+# deterministic; preserve per-image mask geometry or variable-length box targets.
+#
+# <details>
+# <summary>Hint 1 — choose the operation</summary>
+#
+# Read paired image/mask geometry, resize masks with nearest-neighbor sampling and keep evaluation
+# deterministic. The target batch is [B,1,H,W] with values 0/1, not interpolated class fractions.
+#
+# </details>
+#
+# <details>
+# <summary>Hint 2 — implementation direction</summary>
+#
+# Call the supplied loader_for for each fold. Detection trains with training=True; the first mask
+# sanity run uses deterministic geometry.
+#
+# </details>
+
+
+# %% [exercise] [stage-6]
+def make_loader_pair(training_frame: pd.DataFrame, validation_frame: pd.DataFrame) -> Any:
+    """Input: disjoint training/validation image records. Return two aligned loaders. Keep
+    validation deterministic; preserve per-image mask geometry or variable-length box
+    targets.
+    """
+    # >>> exercise: implement make_loader_pair using the stated contract
+    train_loader, valid_loader = loader_for(training_frame, False), loader_for(validation_frame)
+    # <<< exercise
+    return train_loader, valid_loader
+
+
+# %% [markdown]
+# **Check before continuing.** Predict the result, run the small test below, and use its assertion
+# message to locate an error. Expected: all assertions pass and the printed success message
+# appears. These checks do not fit the real candidate.
+
+# %% [check] [stage-6]
+toy_train_loader, toy_valid_loader = make_loader_pair(tr, va)
+toy_images, toy_targets = next(iter(toy_valid_loader))
+assert len(toy_images) == len(toy_targets) and len(toy_images) > 0
+print("Loader check passed: each image has its own aligned target.")
+
+# %% [worked] [stage-6]
+train_loader, valid_loader = make_loader_pair(tr, va)
 pixels, masks = next(iter(train_loader))
 assert masks.shape == (len(pixels), 1, IMAGE_SIZE, IMAGE_SIZE)
 assert set(masks.unique().tolist()) <= {0.0, 1.0}
 print("Batch:", pixels.shape, masks.shape, "Pixels:", pixels.min().item(), pixels.max().item())
 
 # %% [markdown]
-# ## 7. Define the model and loss
+# ### Stop and explain
 #
-# State why the output dimension and loss fit this prediction contract. First verify the
-# simplest model. Pretrained initialization is disabled unless the exact local asset is
-# permitted.
+# State the feature/batch shapes and the exact point at which preprocessing is fitted. What
+# happens to a previously unseen validation input?
 #
-# A dense predictor produces a foreground logit at every pixel. It can establish a complete
-# route quickly but has limited context; U-Net is the next model to study.
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
 #
+# Read paired image/mask geometry, resize masks with nearest-neighbor sampling and keep evaluation
+# deterministic. The target batch is [B,1,H,W] with values 0/1, not interpolated class fractions.
+#
+# </details>
 
-# %% [exercise]
+# %% [markdown]
+# ## 7. Connect outputs, loss and official metric
+#
+# The dense predictor outputs [B,1,H,W] foreground logits. This baseline sets dice_weight=0 for
+# pure BCE; the advanced U-Net combines Dice and BCE. Keep sigmoid out of the model when
+# BCEWithLogitsLoss is responsible for the stable probability conversion.
+
+# %% [markdown]
+# ### Worked component — `salt_score`
+#
+# TGS single binary mask per image: mean hits at strict IoU thresholds .50:.05:.95.
+#
+# Inputs are equally shaped [N,H,W] binary masks. Both empty scores one, exactly one empty
+# scores zero. This is not pixel Dice, continuous mean IoU, or instance COCO average precision.
+
+
+# %% [worked] [stage-7]
+def salt_score(truth: ArrayLike, prediction: ArrayLike) -> float:
+    """TGS single binary mask per image: mean hits at strict IoU thresholds .50:.05:.95.
+
+    Inputs are equally shaped [N,H,W] binary masks. Both empty scores one, exactly one empty
+    scores zero. This is not pixel Dice, continuous mean IoU, or instance COCO average precision.
+    """
+    y, p = np.asarray(truth), np.asarray(prediction)
+    if y.ndim != 3 or y.shape != p.shape or not y.size:
+        raise ValueError("Expected aligned nonempty [N,H,W] masks at original resolution")
+    if not np.isin(y, [0, 1]).all() or not np.isin(p, [0, 1]).all():
+        raise ValueError("Threshold probability maps before scoring binary masks")
+    intersection = np.logical_and(y, p).sum(axis=(1, 2))
+    union = np.logical_or(y, p).sum(axis=(1, 2))
+    iou = np.divide(intersection, union, out=np.ones(len(y)), where=union != 0)
+    thresholds = np.arange(50, 100, 5) / 100
+    return float((iou[:, None] > thresholds).mean())
+
+
+# %% [markdown]
+# ### Supplied helper — `save_torch_state`
+#
+# Atomically save torch state without importing torch until this function is used.
+
+
+# %% [provided] [stage-7]
+def save_torch_state(value: Any, path: Path | str) -> Path:
+    """Atomically save torch state without importing torch until this function is used."""
+    return _write(value, path, "torch")
+
+
+# %% [markdown]
+# ### Supplied helper — `sync_artifacts`
+#
+# Copy the entire candidate, including encoders, preserving separate run folders.
+
+
+# %% [provided] [stage-7]
+def sync_artifacts(source: Path | str, destination: Path | str | None) -> list[Path]:
+    """Copy the entire candidate, including encoders, preserving separate run folders."""
+    if destination is None:
+        return []
+    source, destination = Path(source).resolve(), Path(destination).resolve()
+    if (
+        destination == source
+        or destination.is_relative_to(source)
+        or source.is_relative_to(destination)
+    ):
+        raise ValueError("Output and backup folders must be separate")
+    copied = []
+    for path in source.rglob("*"):
+        if path.is_file() and not path.name.endswith(".tmp"):
+            target = destination / path.relative_to(source)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+            try:
+                shutil.copy2(path, temporary)
+                temporary.replace(target)
+            finally:
+                temporary.unlink(missing_ok=True)
+            copied.append(target)
+    return copied
+
+
+# %% [markdown]
+# ### Worked component — `evaluate_metric`
+#
+# Only the metrics used in this lesson; task-specific graders appear beside the model.
+
+
+# %% [worked] [stage-7]
+def evaluate_metric(name: str, truth: Any, prediction: Any, **kwargs: Any) -> float:
+    """Only the metrics used in this lesson; task-specific graders appear beside the model."""
+    from sklearn.metrics import accuracy_score, roc_auc_score
+
+    if name == "roc_auc":
+        return float(roc_auc_score(truth, prediction, **kwargs))
+    if name == "accuracy":
+        return float(accuracy_score(truth, prediction))
+    if name == "dice_mean_image":
+        y, p = np.asarray(truth, bool), np.asarray(prediction, bool)
+        if y.shape != p.shape or not y.size:
+            raise ValueError("Need aligned nonempty masks")
+        axes = tuple(range(1, y.ndim))
+        denominator = y.sum(axis=axes) + p.sum(axis=axes)
+        return float(
+            np.divide(
+                2 * (y & p).sum(axis=axes), denominator, out=np.ones(len(y)), where=denominator != 0
+            ).mean()
+        )
+    raise ValueError(f"Unsupported lesson metric: {name}")
+
+
+# %% [markdown]
+# ### Exercise 4 — `score_original_masks`
+#
+# Input: original-resolution binary truth [N,H,W] and aligned probabilities. Return the task score
+# at the selected probability threshold. Empty masks follow the official both-empty convention.
+#
+# <details>
+# <summary>Hint 1 — choose the operation</summary>
+#
+# Resize probabilities back before thresholding, then select a threshold on validation only. The
+# strict IoU thresholds and empty-mask convention matter. Keep the chosen threshold in the
+# inference recipe.
+#
+# </details>
+#
+# <details>
+# <summary>Hint 2 — implementation direction</summary>
+#
+# Threshold the original-size probabilities, then call salt_score. Do not use a
+# training-resolution Dice score.
+#
+# </details>
+
+
+# %% [exercise] [stage-7]
+def score_original_masks(
+    references: np.ndarray, probabilities: np.ndarray, threshold: float = 0.5
+) -> Any:
+    """Input: original-resolution binary truth [N,H,W] and aligned probabilities. Return the
+    task score at the selected probability threshold. Empty masks follow the official both-
+    empty convention.
+    """
+    # >>> exercise: implement score_original_masks using the stated contract
+    score = salt_score(references, probabilities > threshold)
+    # <<< exercise
+    return score
+
+
+# %% [markdown]
+# **Check before continuing.** Predict the result, run the small test below, and use its assertion
+# message to locate an error. Expected: all assertions pass and the printed success message
+# appears. These checks do not fit the real candidate.
+
+# %% [check] [stage-7]
+toy_truth = np.array([[[0, 1]]], dtype=np.uint8)
+toy_probabilities = np.array([[[0.4, 0.6]]], dtype=np.float32)
+assert score_original_masks(toy_truth, toy_probabilities) == 1.0
+assert score_original_masks(np.zeros((1, 2, 2)), np.zeros((1, 2, 2))) == 1.0
+print("Original-mask checks passed: perfect and both-empty masks score one.")
+
+# %% [worked] [stage-7]
 from torch.nn import functional as F
 
+# %% [markdown]
+# ### Worked component — `DiceBCELoss`
+#
+# Weighted sum of binary cross entropy and soft Dice loss.
 
+
+# %% [worked] [stage-7]
 class DiceBCELoss(nn.Module):
     """Weighted sum of binary cross entropy and soft Dice loss."""
 
@@ -913,7 +1400,32 @@ class DiceBCELoss(nn.Module):
         return (1 - self.dice_weight) * bce + self.dice_weight * (1 - dice.mean())
 
 
-def make_model():
+# %% [markdown]
+# ### Exercise 5 — `make_model`
+#
+# Construct the stated scratch architecture with the exact output dimensions and legal weight
+# policy. The actual batch/model compatibility check below must pass before any full training.
+#
+# <details>
+# <summary>Hint 1 — choose the operation</summary>
+#
+# The dense predictor outputs [B,1,H,W] foreground logits. This baseline sets dice_weight=0 for
+# pure BCE; the advanced U-Net combines Dice and BCE. Keep sigmoid out of the model when
+# BCEWithLogitsLoss is responsible for the stable probability conversion.
+#
+# </details>
+#
+# <details>
+# <summary>Hint 2 — implementation direction</summary>
+#
+# output one raw foreground logit for every input pixel
+#
+# </details>
+
+
+# %% [exercise] [stage-7]
+def make_model() -> nn.Module:
+    """Build a scratch RGB dense predictor returning raw logits [B,1,H,W]."""
     # >>> exercise: output one raw foreground logit for every input pixel
     return nn.Sequential(
         nn.Conv2d(3, 16, 3, padding=1),
@@ -925,26 +1437,137 @@ def make_model():
     # <<< exercise
 
 
+# %% [markdown]
+# **Check before continuing.** Predict the result, run the small test below, and use its assertion
+# message to locate an error. Expected: all assertions pass and the printed success message
+# appears. These checks do not fit the real candidate.
+
+# %% [check] [stage-7]
+with torch.random.fork_rng(devices=[]), torch.no_grad():
+    toy_network = make_model().eval()
+    toy_logits = toy_network(torch.zeros(2, 3, 16, 24))
+    assert toy_logits.shape == (2, 1, 16, 24) and torch.isfinite(toy_logits).all()
+    toy_loss = nn.functional.binary_cross_entropy_with_logits(
+        toy_logits, torch.zeros_like(toy_logits)
+    )
+    assert torch.isfinite(toy_loss)
+print("Dense-output checks passed: non-square mask geometry and BCE-compatible logits.")
+
+# %% [worked] [stage-7]
 model = make_model()
 criterion = DiceBCELoss(dice_weight=0, pos_weight=pixel_weight if USE_IMBALANCE_WEIGHTS else None)
 criterion = criterion.to(competition.device)
 MODEL_DESCRIPTION = "small dense scratch mask predictor + BCE"
 
 # %% [markdown]
-# ## 8. Train and preserve the candidate
+# ### Exercise 6 — `select_mask_threshold`
 #
-# First fit a tiny subset as a debugging drill; rebuild before the real-fold experiment. Main
-# torch lessons define their small training loop directly below, including precision, time
-# reserves and atomic best checkpoints. For sklearn fit the full preprocessing pipeline together.
+# Input: original-size validation masks/probabilities and a bounded candidate grid. Return the
+# score table, selected threshold and score. Resolve equal scores by proximity to 0.5; never use
+# test masks.
 #
-# The base loop's ordinary resized-mask metric would be wrong for this task. The subclass
-# selects with original-resolution TGS score at .5. The later bounded threshold comparison is
-# performed on the saved candidate, not on test data.
+# <details>
+# <summary>Hint 1 — choose the operation</summary>
 #
+# Resize probabilities back before thresholding, then select a threshold on validation only. The
+# strict IoU thresholds and empty-mask convention matter. Keep the chosen threshold in the
+# inference recipe.
+#
+# </details>
+#
+# <details>
+# <summary>Hint 2 — implementation direction</summary>
+#
+# Evaluate salt_score after strict probability thresholding; maximize score and use distance to
+# 0.5 only as the tie-breaker.
+#
+# </details>
 
-# %% [exercise]
+
+# %% [exercise] [stage-7]
+def select_mask_threshold(
+    references: np.ndarray, probabilities: np.ndarray, candidates: Sequence[float]
+) -> Any:
+    """Input: original-size validation masks/probabilities and a bounded candidate grid. Return
+    the score table, selected threshold and score. Resolve equal scores by proximity to 0.5;
+    never use test masks.
+    """
+    # >>> exercise: implement select_mask_threshold using the stated contract
+    scores_by_threshold = {
+        value: salt_score(references, probabilities > value) for value in candidates
+    }
+    selected_threshold = max(
+        candidates, key=lambda value: (scores_by_threshold[value], -abs(value - 0.5))
+    )
+    validation_score = scores_by_threshold[selected_threshold]
+    # <<< exercise
+    return scores_by_threshold, selected_threshold, validation_score
 
 
+# %% [markdown]
+# **Check before continuing.** Predict the result, run the small test below, and use its assertion
+# message to locate an error. Expected: all assertions pass and the printed success message
+# appears. These checks do not fit the real candidate.
+
+# %% [check] [stage-7]
+toy_truth = np.array([[[0, 1]]], dtype=np.uint8)
+toy_probabilities = np.array([[[0.4, 0.6]]], dtype=np.float32)
+toy_scores, toy_threshold, toy_score = select_mask_threshold(
+    toy_truth, toy_probabilities, (0.3, 0.5, 0.7)
+)
+assert toy_threshold == 0.5 and toy_score == 1.0
+assert set(toy_scores) == {0.3, 0.5, 0.7}
+print("Threshold checks passed: validation search selects the perfect binary mask.")
+
+# %% [markdown]
+# **Actual model/batch compatibility.** Run an evaluation forward pass before full training.
+# Expected: finite logits with the stated batch/output dimensions. Restore the model's previous
+# mode afterward.
+
+# %% [check] [stage-7]
+was_training = model.training
+model.eval()
+with torch.no_grad():
+    example_inputs, example_targets = next(iter(valid_loader))
+    example_inputs = example_inputs[:2].to(next(model.parameters()).device)
+    example_logits = model(example_inputs)
+    assert tuple(example_logits.shape) == (len(example_inputs), 1, *example_inputs.shape[-2:]), (
+        "Model outputs do not match the task contract"
+    )
+    assert torch.isfinite(example_logits).all()
+model.train(was_training)
+print("Actual batch/model compatibility passed:", tuple(example_logits.shape))
+
+# %% [markdown]
+# ### Stop and explain
+#
+# Explain the output shape, loss and prediction decoding without reading the implementation. Which
+# convention would silently produce an invalid score?
+#
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
+#
+# The dense predictor outputs [B,1,H,W] foreground logits. This baseline sets dice_weight=0 for
+# pure BCE; the advanced U-Net combines Dice and BCE. Keep sigmoid out of the model when
+# BCEWithLogitsLoss is responsible for the stable probability conversion. Resize probabilities
+# back before thresholding, then select a threshold on validation only. The strict IoU thresholds
+# and empty-mask convention matter. Keep the chosen threshold in the inference recipe.
+#
+# </details>
+
+# %% [markdown]
+# ## 8. Train and preserve a recoverable candidate
+#
+# The supplied trainer selects checkpoints using TGS at original resolution. A loss decrease at
+# the training resolution is useful for debugging but cannot replace the official selection score.
+
+# %% [markdown]
+# ### Supplied helper — `TrainerConfig`
+#
+# Small lesson loop: AdamW, one step per batch, no scheduler.
+
+
+# %% [provided] [stage-8]
 @dataclass
 class TrainerConfig:
     """Small lesson loop: AdamW, one step per batch, no scheduler."""
@@ -957,6 +1580,13 @@ class TrainerConfig:
     patience: int = 2
 
 
+# %% [markdown]
+# ### Supplied helper — `Trainer`
+#
+# Visible training loop: validate globally, keep the best, reload before returning.
+
+
+# %% [provided] [stage-8]
 class Trainer:
     """Visible training loop: validate globally, keep the best, reload before returning."""
 
@@ -1071,27 +1701,17 @@ class Trainer:
         return history
 
 
+# %% [worked] [stage-8]
 from numpy.typing import ArrayLike
 
-
-def salt_score(truth: ArrayLike, prediction: ArrayLike) -> float:
-    """TGS single binary mask per image: mean hits at strict IoU thresholds .50:.05:.95.
-
-    Inputs are equally shaped [N,H,W] binary masks. Both empty scores one, exactly one empty
-    scores zero. This is not pixel Dice, continuous mean IoU, or instance COCO average precision.
-    """
-    y, p = np.asarray(truth), np.asarray(prediction)
-    if y.ndim != 3 or y.shape != p.shape or not y.size:
-        raise ValueError("Expected aligned nonempty [N,H,W] masks at original resolution")
-    if not np.isin(y, [0, 1]).all() or not np.isin(p, [0, 1]).all():
-        raise ValueError("Threshold probability maps before scoring binary masks")
-    intersection = np.logical_and(y, p).sum(axis=(1, 2))
-    union = np.logical_or(y, p).sum(axis=(1, 2))
-    iou = np.divide(intersection, union, out=np.ones(len(y)), where=union != 0)
-    thresholds = np.arange(50, 100, 5) / 100
-    return float((iou[:, None] > thresholds).mean())
+# %% [markdown]
+# ### Worked component — `probability_maps`
+#
+# Run this supplied definition before its callers. Its inputs and invariants are explained in this
+# section.
 
 
+# %% [worked] [stage-8]
 def probability_maps(network, frame):
     logits = predict_logits(
         network, loader_for(frame.drop(columns="mask", errors="ignore")), device=competition.device
@@ -1110,19 +1730,26 @@ def probability_maps(network, frame):
     return np.stack(probabilities)
 
 
+# %% [worked] [stage-8]
 references = np.stack([read_mask(path) for path in va["mask"]])
 
+# %% [markdown]
+# ### Worked component — `SaltTrainer`
+#
+# Run this supplied definition before its callers. Its inputs and invariants are explained in this
+# section.
 
+
+# %% [worked] [stage-8]
 class SaltTrainer(Trainer):
     def evaluate(self, loader):
         values = super().evaluate(loader)
-        # >>> exercise: choose checkpoints with the original-resolution task score
         probabilities = probability_maps(self.model, va)
-        values["metric"] = salt_score(references, probabilities > 0.5)
-        # <<< exercise
+        values["metric"] = score_original_masks(references, probabilities)
         return values
 
 
+# %% [worked] [stage-8]
 started = perf_counter()
 training = TrainerConfig(
     epochs=EPOCHS,
@@ -1147,29 +1774,38 @@ fit_seconds = perf_counter() - started
 checkpoint_path = trainer.checkpoint_path
 validation_probabilities = probability_maps(model, va)
 
-# %% [markdown]
-# ## 9. Validate, inspect errors and compare cost
-#
-# Use all validation predictions for the exact score. Inspect individual mistakes and
-# minority/group performance; the diagnostic metric does not replace the official metric. Keep a
-# score/runtime ledger before choosing more complexity.
-#
-# Both empty masks score one, one empty mask scores zero, and an IoU exactly equal to a cutoff
-# is not a hit under this TGS convention. Threshold selection reuses validation, so treat small
-# gains cautiously and confirm on a separate practice pack.
-#
+# %% [check] [stage-8]
+assert checkpoint_path.is_file(), "No saved candidate is available for inference"
+assert np.isfinite(fit_seconds) and fit_seconds >= 0
+print("Candidate checks passed: persisted artifact and measured fit time.")
 
-# %% [exercise]
+# %% [markdown]
+# ### Stop and explain
+#
+# What evidence proves the saved artifact can reproduce inference? Which training state is not
+# promised by this reload?
+#
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
+#
+# Keep architecture/preprocessing, label order and best weights together, then compare reloaded
+# validation predictions. This lesson preserves inference recovery, not an exact continuation of
+# optimizer/scaler/random state.
+#
+# </details>
+
+# %% [markdown]
+# ## 9. Interpret validation and compare experiments
+#
+# Resize probabilities back before thresholding, then select a threshold on validation only. The
+# strict IoU thresholds and empty-mask convention matter. Keep the chosen threshold in the
+# inference recipe.
+
+# %% [worked] [stage-9]
 candidates = (0.5,)
-# >>> exercise: select any threshold on validation only using the actual TGS score
-scores_by_threshold = {
-    value: salt_score(references, validation_probabilities > value) for value in candidates
-}
-selected_threshold = max(
-    candidates, key=lambda value: (scores_by_threshold[value], -abs(value - 0.5))
+scores_by_threshold, selected_threshold, validation_score = select_mask_threshold(
+    references, validation_probabilities, candidates
 )
-validation_score = scores_by_threshold[selected_threshold]
-# <<< exercise
 print("Original-resolution TGS score:", validation_score, "Thresholds:", scores_by_threshold)
 print("Empty-mask reference:", salt_score(references, np.zeros_like(references)))
 diagnostic_dice = evaluate_metric(
@@ -1192,6 +1828,8 @@ fig, axes = plt.subplots(1, 3, figsize=(9, 3))
 axes[0].imshow(references[0], cmap="gray")
 axes[0].set_title("True mask")
 axes[1].imshow(validation_probabilities[0], vmin=0, vmax=1)
+
+# %% [worked] [stage-9]
 axes[1].set_title("Foreground probability")
 axes[2].imshow(validation_probabilities[0] > selected_threshold, cmap="gray")
 axes[2].set_title("Submitted binary mask")
@@ -1199,18 +1837,38 @@ fig.savefig(OUTPUT / "validation.png")
 plt.show()
 plt.close(fig)
 
+# %% [check] [stage-9]
+assert np.isfinite(validation_score), "Selection requires a finite official score"
+print("Validation check passed. Compare this score and runtime with the baseline ledger.")
+
 # %% [markdown]
-# ## 10. Reload and run complete inference
+# ### Stop and explain
 #
-# Rebuild or reload the saved candidate before test inference. Preserve ID order through the
-# loader, then align to the sample by ID. Check that reloaded validation predictions agree. This
-# is inference recovery, not exact training continuation.
+# What is the next single experiment, and what result would make you reject it?
 #
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
 #
+# Compare the dense predictor and U-Net with the same original-resolution grader and validation
+# images. Separate architecture, initialization and threshold experiments; inspect empty-image
+# errors and inference memory.
 #
+# </details>
+
+# %% [markdown]
+# ## 10. Reload and infer every test item
+#
+# Reload the best state, reproduce original-size validation probabilities and encode each test
+# mask in column-major order. Check RLE decode/encode round trips, including empty and non-square
+# masks.
+
+# %% [markdown]
+# ### Worked component — `mask_to_rle`
+#
+# Encode a binary mask as one-indexed, column-major run-length encoding.
 
 
-# %% [exercise]
+# %% [worked] [stage-10]
 def mask_to_rle(mask: np.ndarray) -> str:
     """Encode a binary mask as one-indexed, column-major run-length encoding."""
     pixels = np.asarray(mask, dtype=np.uint8).T.reshape(-1)
@@ -1220,6 +1878,13 @@ def mask_to_rle(mask: np.ndarray) -> str:
     return " ".join(str(value) for value in changes)
 
 
+# %% [markdown]
+# ### Worked component — `rle_to_mask`
+#
+# Decode one-indexed, column-major RLE into a ``uint8`` mask of ``(height, width)``.
+
+
+# %% [worked] [stage-10]
 def rle_to_mask(rle: str | float | None, shape: tuple[int, int]) -> np.ndarray:
     """Decode one-indexed, column-major RLE into a ``uint8`` mask of ``(height, width)``."""
     if rle is None or (isinstance(rle, float) and np.isnan(rle)) or not str(rle).strip():
@@ -1239,7 +1904,33 @@ def rle_to_mask(rle: str | float | None, shape: tuple[int, int]) -> np.ndarray:
     return flat.reshape((shape[1], shape[0])).T
 
 
+# %% [worked] [stage-10]
 started = perf_counter()
+
+# %% [markdown]
+# ### Exercise 7 — Reload and predict
+#
+# Reload the best state, reproduce original-size validation probabilities and encode each test
+# mask in column-major order. Check RLE decode/encode round trips, including empty and non-square
+# masks.
+#
+# <details>
+# <summary>Hint 1 — choose the operation</summary>
+#
+# Reload the best state, reproduce original-size validation probabilities and encode each test
+# mask in column-major order. Check RLE decode/encode round trips, including empty and non-square
+# masks.
+#
+# </details>
+#
+# <details>
+# <summary>Hint 2 — implementation direction</summary>
+#
+# restore the best state and encode original-size masks in column-major RLE
+#
+# </details>
+
+# %% [exercise] [stage-10]
 # >>> exercise: restore the best state and encode original-size masks in column-major RLE
 restored = make_model().to(competition.device)
 restored.load_state_dict(
@@ -1252,6 +1943,8 @@ np.testing.assert_allclose(
 test_masks = probability_maps(restored, test) > selected_threshold
 encoded = [mask_to_rle(mask) for mask in test_masks]
 # <<< exercise
+
+# %% [worked] [stage-10]
 for mask, text in zip(test_masks, encoded, strict=True):
     np.testing.assert_array_equal(rle_to_mask(text, mask.shape), mask)
 output_values = {"rle_mask": encoded}
@@ -1267,18 +1960,44 @@ save_json(
 )
 inference_seconds = perf_counter() - started
 
+# %% [check] [stage-10]
+assert set(output_values) == set(sample.columns) - {ID_COLUMN}
+assert all(len(values) == len(test) for values in output_values.values())
+print("Inference checks passed: every test item has the required output columns.")
+
 # %% [markdown]
-# ## 11. Validate the submission and persist the recipe
+# ### Stop and explain
 #
-# Validate the on-disk UTF-8 file, expected columns, ID order and task-specific value
-# constraints. Keep source, preprocessing, fold IDs, labels, thresholds, score and runtime with
-# the selected artifact. A checked CSV is not proof of upload acceptance.
+# Can this saved candidate handle every private input without refitting or downloading anything?
+# Which assets must travel with it?
 #
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
 #
+# Reload the best state, reproduce original-size validation probabilities and encode each test
+# mask in column-major order. Check RLE decode/encode round trips, including empty and non-square
+# masks.
 #
+# </details>
+
+# %% [markdown]
+# ## 11. Deliver and verify the submission
+#
+# Predict one binary salt mask per image and encode it as column-major RLE. Empty masks are valid.
+# Train at a small resolution if needed, but restore probabilities to each original image size
+# before official scoring or encoding.
+#
+# Write the CSV, read it back, and verify IDs, columns, row count, missing values and allowed
+# prediction values before saving the complete recipe. A local check does not confirm organizer
+# upload acceptance.
+
+# %% [markdown]
+# ### Supplied helper — `SubmissionValidation`
+#
+# Validation errors and non-fatal warnings for a candidate submission.
 
 
-# %% [exercise]
+# %% [provided] [stage-11]
 @dataclass(slots=True)
 class SubmissionValidation:
     """Validation errors and non-fatal warnings for a candidate submission."""
@@ -1293,6 +2012,16 @@ class SubmissionValidation:
             raise ValueError("Invalid submission: " + "; ".join(self.errors))
 
 
+# %% [markdown]
+# ### Supplied helper — `build_submission`
+#
+# Copy the sample and optionally align predictions using unique (possibly composite) IDs.
+#
+# Without IDs, predictions must already be in sample order. Prefer explicit IDs for inference.
+# Alignment rejects missing, duplicate, extra, or absent keys rather than guessing row order.
+
+
+# %% [provided] [stage-11]
 def build_submission(
     sample: pd.DataFrame,
     predictions: Mapping[str, Sequence[object]],
@@ -1343,6 +2072,13 @@ def build_submission(
     return submission
 
 
+# %% [markdown]
+# ### Supplied helper — `validate_submission`
+#
+# Check schema, row count, ID order, missing values, and optional allowed labels.
+
+
+# %% [provided] [stage-11]
 def validate_submission(
     submission: pd.DataFrame,
     sample: pd.DataFrame,
@@ -1388,6 +2124,13 @@ def validate_submission(
     return SubmissionValidation(valid=not errors, errors=errors, warnings=warnings)
 
 
+# %% [markdown]
+# ### Supplied helper — `write_submission`
+#
+# Validate then atomically write a UTF-8 CSV submission.
+
+
+# %% [provided] [stage-11]
 def write_submission(
     submission: pd.DataFrame,
     path: Path | str,
@@ -1413,6 +2156,14 @@ def write_submission(
     return destination
 
 
+# %% [markdown]
+# ### Supplied helper — `_mapping`
+#
+# Run this supplied definition before its callers. Its inputs and invariants are explained in this
+# section.
+
+
+# %% [provided] [stage-11]
 def _mapping(value: Any) -> Mapping[str, Any]:
     if is_dataclass(value):
         return asdict(value)
@@ -1421,6 +2172,13 @@ def _mapping(value: Any) -> Mapping[str, Any]:
     raise TypeError("Expected a dataclass or mapping")
 
 
+# %% [markdown]
+# ### Supplied helper — `technical_report`
+#
+# Render the standard competition handoff report as Markdown text.
+
+
+# %% [provided] [stage-11]
 def technical_report(
     *,
     task: str,
@@ -1459,6 +2217,13 @@ def technical_report(
     return "\n".join(lines) + "\n"
 
 
+# %% [markdown]
+# ### Supplied helper — `write_technical_report`
+#
+# Write a UTF-8 technical report, creating its parent directory.
+
+
+# %% [provided] [stage-11]
 def write_technical_report(content: str, path: Path | str) -> Path:
     """Write a UTF-8 technical report, creating its parent directory."""
     destination = Path(path)
@@ -1467,6 +2232,13 @@ def write_technical_report(content: str, path: Path | str) -> Path:
     return destination
 
 
+# %% [markdown]
+# ### Supplied helper — `record_run`
+#
+# Save configuration/fold positions and a matching human-readable technical report.
+
+
+# %% [provided] [stage-11]
 def record_run(
     output_dir: Path | str,
     *,
@@ -1514,13 +2286,85 @@ def record_run(
     return write_technical_report(report, root / "technical_report.md")
 
 
-# >>> exercise: align predictions to sample IDs and validate the complete file
-submission = build_submission(
-    sample, output_values, prediction_ids=test[ID_COLUMN], id_columns=ID_COLUMN
+# %% [markdown]
+# ### Exercise 8 — `deliver_submission`
+#
+# Input: sample template, named predictions, prediction IDs, key-column name and output path.
+# Return: ID-aligned checked frame and saved CSV path. Reject duplicated, missing or extra
+# prediction keys.
+#
+# <details>
+# <summary>Hint 1 — choose the operation</summary>
+#
+# Predict one binary salt mask per image and encode it as column-major RLE. Empty masks are valid.
+# Train at a small resolution if needed, but restore probabilities to each original image size
+# before official scoring or encoding.
+#
+# </details>
+#
+# <details>
+# <summary>Hint 2 — implementation direction</summary>
+#
+# Build by ID, raise validation errors, then write the validated frame. Never assume test order
+# equals sample order.
+#
+# </details>
+
+
+# %% [exercise] [stage-11]
+def deliver_submission(
+    sample_frame: pd.DataFrame,
+    predictions: Mapping[str, Sequence[object]],
+    prediction_ids: Sequence[object],
+    id_column: str,
+    output_path: Path,
+) -> Any:
+    """Input: sample template, named predictions, prediction IDs, key-column name and output
+    path. Return: ID-aligned checked frame and saved CSV path. Reject duplicated, missing or
+    extra prediction keys.
+    """
+    # >>> exercise: implement deliver_submission using the stated contract
+    submission = build_submission(
+        sample_frame, predictions, prediction_ids=prediction_ids, id_columns=id_column
+    )
+    validate_submission(submission, sample_frame, id_columns=id_column).raise_for_errors()
+    destination = write_submission(submission, output_path)
+    # <<< exercise
+    return submission, destination
+
+
+# %% [markdown]
+# **Check before continuing.** Predict the result, run the small test below, and use its assertion
+# message to locate an error. Expected: all assertions pass and the printed success message
+# appears. These checks do not fit the real candidate.
+
+# %% [check] [stage-11]
+toy_sample = pd.DataFrame({"key": ["001", "NA"], "prediction": [0.0, 0.0]})
+toy_submission, toy_path = deliver_submission(
+    toy_sample, {"prediction": [0.8, 0.2]}, ["NA", "001"], "key", OUTPUT / "checks" / "delivery.csv"
 )
-validate_submission(submission, sample, id_columns=ID_COLUMN).raise_for_errors()
-destination = write_submission(submission, OUTPUT / "submission.csv")
-# <<< exercise
+assert toy_submission["key"].tolist() == ["001", "NA"], "Preserve literal IDs and sample order"
+np.testing.assert_allclose(toy_submission["prediction"], [0.2, 0.8])
+toy_loaded = pd.read_csv(toy_path, converters={"key": str}, keep_default_na=False)
+assert toy_loaded["key"].tolist() == ["001", "NA"]
+try:
+    deliver_submission(
+        toy_sample,
+        {"prediction": [0.2, 0.8]},
+        ["001", "001"],
+        "key",
+        OUTPUT / "checks" / "invalid.csv",
+    )
+except ValueError:
+    pass
+else:
+    raise AssertionError("Duplicate prediction IDs must be rejected, not guessed")
+print("Delivery checks passed: shuffled/literal IDs and duplicate rejection.")
+
+# %% [worked] [stage-11]
+submission, destination = deliver_submission(
+    sample, output_values, test[ID_COLUMN], ID_COLUMN, OUTPUT / "submission.csv"
+)
 roundtrip = pd.read_csv(
     destination, converters={ID_COLUMN: str}, keep_default_na=False, float_precision="round_trip"
 )
@@ -1532,6 +2376,8 @@ save_json(
     {"train_ids": tr[ID_COLUMN].tolist(), "validation_ids": va[ID_COLUMN].tolist()},
     OUTPUT / "fold_ids.json",
 )
+
+# %% [worked] [stage-11]
 save_json(
     {
         "epochs": EPOCHS,
@@ -1540,10 +2386,7 @@ save_json(
         "max_rows": MAX_ROWS,
         "image_size": IMAGE_SIZE,
         "model_name": MODEL_NAME,
-        "max_length": MAX_LENGTH,
-        "embedding_dim": EMBEDDING_DIM,
         "imbalance_weights": USE_IMBALANCE_WEIGHTS,
-        "history_features": USE_HISTORY_FEATURES,
         "pretrained_allowed": PRETRAINED_ALLOWED,
         "initial_weight_path": WEIGHT_PATH,
         "asset_provenance": ASSET_PROVENANCE,
@@ -1551,6 +2394,8 @@ save_json(
     },
     OUTPUT / "lesson_config.json",
 )
+
+# %% [worked] [stage-11]
 record_run(
     OUTPUT,
     task=FAMILY,
@@ -1566,7 +2411,6 @@ record_run(
         "threshold": float(selected_threshold),
         "label_order": TARGET_COLUMNS,
         "image_size": IMAGE_SIZE,
-        "max_length": MAX_LENGTH,
         "model_name": MODEL_NAME,
         "asset_provenance": ASSET_PROVENANCE,
     },
@@ -1577,6 +2421,8 @@ record_run(
         f"Imbalance weights enabled: {USE_IMBALANCE_WEIGHTS}",
     ],
 )
+
+# %% [worked] [stage-11]
 pd.DataFrame(
     [
         {
@@ -1589,8 +2435,50 @@ pd.DataFrame(
         }
     ]
 ).to_csv(OUTPUT / "comparison_row.csv", index=False)
-# Save your edited notebook/source alongside this folder before transferring the bundle.
 copied = sync_artifacts(OUTPUT, DURABLE_OUTPUT)
 print("Checked local CSV:", destination, "Durable files copied:", len(copied))
 
-# ruff: noqa: E402
+# %% [check] [stage-11]
+assert destination.is_file()
+assert submission[ID_COLUMN].tolist() == sample[ID_COLUMN].tolist()
+print("Delivery complete. Next: restart inference, then attempt the reconstruction task.")
+
+# %% [markdown]
+# ### Stop and explain
+#
+# Which ID-order or encoding mistake would survive a plausible-looking preview? What did the
+# on-disk round trip prove?
+#
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
+#
+# Shuffled sample IDs and literal strings such as 001/NA require explicit alignment and CSV
+# parsing. Readback checks the delivered file's schema/order/values; official task semantics and
+# upload acceptance still need separate confirmation.
+#
+# </details>
+
+# %% [markdown]
+# ## Transfer and closed-book reconstruction
+#
+# A new pack has rectangular images and many empty masks. Rebuild a valid empty/nonempty split and
+# prove original-size resizing plus column-major RLE on a 2-by-3 hand-drawn mask before training.
+#
+# 1. Close the reference notebook and create an empty personal notebook.
+# 2. Rebuild the data contract, split, features/model, fit, official metric and submission path.
+# 3. Deliver a checked small-pack CSV within 45–60 minutes, then reload it in a fresh session.
+# 4. Record elapsed time, hints, bugs and the first function you could not reconstruct.
+# 5. Rebuild that function the next day with a different schema or seed.
+#
+# For the 2k assistant, send one function signature, input/output shapes and one failing toy test.
+# Ask for an explanation or correction of that function only. Keep the rest of the notebook
+# outside the prompt.
+#
+# ### Controlled comparison
+#
+# Compare the dense predictor and U-Net with the same original-resolution grader and validation
+# images. Separate architecture, initialization and threshold experiments; inspect empty-image
+# errors and inference memory.
+#
+# A first correct submission is the readiness gate. Advanced complexity is selected only after an
+# honest metric/runtime comparison; no test fitting or model-weight permission is implied.

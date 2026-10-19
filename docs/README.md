@@ -3,6 +3,8 @@
 Start with **[seven families and fourteen learning notebooks](../notebooks/learning/README.md)**.
 Fill each baseline's missing code, reveal its collapsed reference after attempting the block,
 then study the advanced method using the same folds and a score/runtime comparison.
+The redesigned lessons use named exercises, two hint levels, executable checks and interpretation
+questions. Follow the [learning rhythm](LEARNING_NOTEBOOK_DESIGN.md) one component at a time.
 All 14 learning notebooks are self-contained: copy one file and configure its data paths;
 no repository imports, companion source files, or project installation are needed to run it.
 The [blank-notebook playbook](BLANK_NOTEBOOK_PLAYBOOK.md) is the final reconstruction assessment

@@ -42,7 +42,8 @@ def _notebook(name: str) -> dict:
     return json.loads((LESSONS / f"{name}_template.ipynb").read_text(encoding="utf-8"))
 
 
-def _expected_code(notebook: dict) -> list[str]:
+def _expected_micro_code(notebook: dict) -> list[tuple[str, str]]:
+    """Recover each supplied/worked cell or baseline answer without executing reveals."""
     cells = notebook["cells"]
     result = []
     for index, cell in enumerate(cells):
@@ -52,10 +53,20 @@ def _expected_code(notebook: dict) -> list[str]:
             solution = "".join(cells[index + 1]["source"])
             match = re.search(r"<pre><code>(.*?)</code></pre>", solution, flags=re.DOTALL)
             assert match is not None
-            result.append(unescape(match.group(1)))
+            code = unescape(match.group(1))
         else:
-            result.append("".join(cell["source"]))
+            code = "".join(cell["source"])
+        stage = next(tag for tag in cell["metadata"]["tags"] if tag.startswith("stage-"))
+        result.append((stage, code))
     return result
+
+
+def _expected_code(notebook: dict) -> list[str]:
+    """Group small cells by competition stage for fixture setup and targeted helper checks."""
+    stages: dict[str, list[str]] = {}
+    for stage, code in _expected_micro_code(notebook):
+        stages.setdefault(stage, []).append(code)
+    return ["\n\n".join(cells) for cells in stages.values()]
 
 
 def _configure(code: str, data: Path, output: Path, runtime: Path) -> str:
@@ -82,7 +93,7 @@ def _configure(code: str, data: Path, output: Path, runtime: Path) -> str:
     return "".join(lines)
 
 
-def test_seven_pairs_have_eleven_stages_plus_optional_download_and_collapsed_answers(
+def test_seven_pairs_have_guided_stages_checks_hints_and_collapsed_answers(
     tmp_path,
 ):
     sources = sorted(LESSONS.glob("*_template.py"))
@@ -95,9 +106,21 @@ def test_seven_pairs_have_eleven_stages_plus_optional_download_and_collapsed_ans
         assert notebook == _notebook(source.name.removesuffix("_template.py"))
         cells = notebook["cells"]
         code_cells = [cell for cell in cells if cell["cell_type"] == "code"]
-        assert len(code_cells) == 12  # Eleven competition stages plus optional acquisition.
+        assert len(_expected_code(notebook)) == 12  # Stages remain, cell count follows pedagogy.
+        assert len(code_cells) > 40
+        assert len("".join(code_cells[0]["source"]).splitlines()) <= 35
+        assert sum("check" in cell["metadata"]["tags"] for cell in code_cells) >= 10
+        configuration = [cell for cell in code_cells if "configuration" in cell["metadata"]["tags"]]
+        assert configuration
+        assert all(
+            not cell["metadata"].get("jupyter", {}).get("source_hidden") for cell in configuration
+        )
+        download_settings = next(
+            cell for cell in code_cells if "DOWNLOAD_DATA = False" in "".join(cell["source"])
+        )
+        assert "configuration" in download_settings["metadata"]["tags"]
         assert len({cell["id"] for cell in cells}) == len(cells)
-        for code in _expected_code(notebook):
+        for _, code in _expected_micro_code(notebook):
             compile(code, source.name, "exec")
             tree = ast.parse(code)
             for node in ast.walk(tree):
@@ -115,9 +138,12 @@ def test_seven_pairs_have_eleven_stages_plus_optional_download_and_collapsed_ans
             assert "sys.path" not in code
             assert "_colab_bootstrap" not in code
         if "_baseline_" in source.name:
+            text = "\n".join("".join(cell["source"]) for cell in cells)
+            assert "Hint 1" in text and "Hint 2" in text
+            assert "Stop and explain" in text and "Transfer and closed-book" in text
             assert (
                 sum("raise NotImplementedError" in "".join(cell["source"]) for cell in code_cells)
-                >= 7
+                == 8
             )
             for index, cell in enumerate(cells):
                 if cell["cell_type"] == "code":
@@ -128,10 +154,15 @@ def test_seven_pairs_have_eleven_stages_plus_optional_download_and_collapsed_ans
                     assert "<details>" in "".join(solution["source"])
                     assert "<details open" not in "".join(solution["source"])
                     compile("".join(cell["source"]), source.name, "exec")
+                    if "exercise" in cell["metadata"]["tags"]:
+                        assert len("".join(cell["source"]).splitlines()) <= 65
         else:
             assert not any(
                 "raise NotImplementedError" in "".join(cell["source"]) for cell in code_cells
             )
+        for cell in code_cells:
+            if "provided" in cell["metadata"]["tags"]:
+                assert cell["metadata"]["jupyter"]["source_hidden"]
     assert len(split_implementations) == 1, "Standalone split copies must retain identical guards"
     assert len(download_implementations) == 1, "Every downloader must retain identical guards"
 
@@ -149,6 +180,45 @@ def test_malformed_exercise_boundaries_fail_export(tmp_path, fragment):
     source.write_text("# %% [exercise]\n" + fragment, encoding="utf-8")
     with pytest.raises(ValueError):
         percent_script_to_notebook(source, tmp_path / "bad.ipynb")
+
+
+@pytest.mark.parametrize(
+    "family,function_name,broken",
+    [
+        ("01_credit", "credit_imbalance", lambda *args: (None, 0)),
+        ("02_prices", "log_training_target", lambda values: np.zeros_like(values)),
+        ("03_toxic", "score_multilabel", lambda *args: ({}, 0)),
+        ("04_leaves", "one_batch_step", lambda *args: 0.0),
+        ("05_salt", "select_mask_threshold", lambda *args: ({}, 0.3, 1.0)),
+        ("06_wheat", "select_confidence", lambda *args: ({}, 0.2, 0)),
+        (
+            "07_matching",
+            "match_positions",
+            lambda features, *args, **kwargs: [[index] for index in range(len(features))],
+        ),
+    ],
+)
+def test_embedded_feedback_rejects_plausible_broken_exercises(
+    tmp_path, family, function_name, broken
+):
+    """Passing examples must not reward no-op updates, wrong metrics or self-only retrieval."""
+    notebook = _notebook(f"{family}_baseline")
+    check = next(
+        "".join(cell["source"])
+        for cell in notebook["cells"]
+        if "check" in cell["metadata"].get("tags", [])
+        and f"{function_name}(" in "".join(cell["source"])
+    )
+    namespace = {
+        "np": np,
+        "pd": pd,
+        "torch": torch,
+        "nn": torch.nn,
+        "OUTPUT": tmp_path,
+        function_name: broken,
+    }
+    with pytest.raises(AssertionError):
+        exec(compile(check, "exercise-feedback", "exec"), namespace)
 
 
 @pytest.mark.parametrize(
@@ -264,8 +334,9 @@ def test_learning_solutions_execute_offline_through_reload_and_delivery(
                     IMAGE_MODEL_CHECKPOINT=image_checkpoint,
                     ASSET_PROVENANCE="Local untrained tiny BERT and ResNet fixture; no task labels",
                 )
-        for index, cell in enumerate(code[1:], 2):
-            exec(compile(cell, f"{family}:{variant}:stage-{index}", "exec"), namespace)
+        for index, (stage, cell) in enumerate(_expected_micro_code(notebook), 1):
+            if stage != "stage-1":  # The configured setup was already executed above.
+                exec(compile(cell, f"{family}:{variant}:{stage}:cell-{index}", "exec"), namespace)
     finally:
         torch.set_num_threads(previous_threads)
     for filename in (
@@ -430,6 +501,16 @@ def test_standalone_storage_and_chronological_split_guards(tmp_path):
         namespace["stage_data"](archive, tmp_path / "staged")
     assert not (tmp_path / "escaped.txt").exists()
     output = tmp_path / "output"
+    sync_definition = next(
+        node
+        for code in cells
+        for node in ast.parse(code).body
+        if isinstance(node, ast.FunctionDef) and node.name == "sync_artifacts"
+    )
+    exec(
+        compile(ast.Module(body=[sync_definition], type_ignores=[]), "inline-sync", "exec"),
+        namespace,
+    )
     with pytest.raises(ValueError, match="separate"):
         namespace["sync_artifacts"](output, output / "nested")
     with pytest.raises(ValueError, match="reserve"):

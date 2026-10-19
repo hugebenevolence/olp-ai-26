@@ -36,19 +36,40 @@
 # After the lesson, close both notebooks and rebuild the essential route from memory. See the
 # repository's blank-notebook playbook for the final transfer test.
 #
+# ## How to use this lesson
+#
+# Read each worked component, predict its output, run its checks, then explain the result. Keep
+# the baseline folds and compare one change at a time. This is a worked advanced study, not a
+# claimed leaderboard reproduction.
+#
+# By the end you should be able to state the data/metric contract, choose a legal split, construct
+# one correct model input, validate a saved candidate and deliver an ID-aligned file. Mini-checks
+# use tiny separate examples or the current training batch; they do not certify real-data quality.
+#
+#  | Stage | Goal |
+# |---|---|
+# | 1 | Environment and configuration |
+# | 1a | Optional dataset acquisition |
+# | 2 | Understand and load the data contract |
+# | 3 | Inspect examples and distributions |
+# | 4 | Build and test the validation split |
+# | 5 | Measure imbalance and choose a response |
+# | 6 | Build features or one correct batch |
+# | 7 | Connect outputs, loss and official metric |
+# | 8 | Train and preserve a recoverable candidate |
+# | 9 | Interpret validation and compare experiments |
+# | 10 | Reload and infer every test item |
+# | 11 | Deliver and verify the submission |
 
 # %% [markdown]
-# ## 1. Bootstrap and configuration
+# ## 1. Environment and configuration
 #
-# Run this supplied setup cell; edit only configuration values. Later algorithm cells contain
-# TODO blocks. No weights are fetched. The next optional cell can acquire practice data;
-# otherwise stage local data before repeated reads.
-# Each candidate gets a new output directory.
-#
-#
-#
+# Run the supplied imports and runtime helpers in order. Edit paths, time budget and model policy
+# in the configuration cells. Inspect the actual device; CPU checks cannot establish GPU
+# throughput. Supplied storage/safety definitions are folded where the viewer supports it: run
+# them, but reconstruct the short algorithmic functions during closed-book practice.
 
-# %%
+# %% [provided] [stage-1]
 import json
 import pickle
 import random
@@ -71,52 +92,15 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
+# ruff: noqa: E402
 
-def _json_default(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if is_dataclass(value):
-        return asdict(value)
-    if hasattr(value, "tolist"):
-        return value.tolist()
-    raise TypeError(f"Cannot serialize {type(value).__name__} as JSON")
+# %% [markdown]
+# ### Supplied helper — `CompetitionConfig`
+#
+# Explicit notebook state; no installed project is required.
 
 
-def _write(value: Any, path: Path | str, kind: str) -> Path:
-    destination = Path(path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
-    try:
-        if kind == "json":
-            temporary.write_text(
-                json.dumps(
-                    value, default=_json_default, indent=2, ensure_ascii=False, allow_nan=False
-                ),
-                encoding="utf-8",
-            )
-        elif kind == "pickle":
-            with temporary.open("wb") as handle:
-                pickle.dump(value, handle, protocol=pickle.HIGHEST_PROTOCOL)
-        else:
-            import torch
-
-            torch.save(value, temporary)
-        temporary.replace(destination)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return destination
-
-
-def save_json(value: Any, path: Path | str) -> Path:
-    """Atomically save UTF-8 metadata, including paths, dataclasses, and NumPy values."""
-    return _write(value, path, "json")
-
-
-def save_torch_state(value: Any, path: Path | str) -> Path:
-    """Atomically save torch state without importing torch until this function is used."""
-    return _write(value, path, "torch")
-
-
+# %% [provided] [stage-1]
 @dataclass
 class CompetitionConfig:
     """Explicit notebook state; no installed project is required."""
@@ -146,6 +130,13 @@ class CompetitionConfig:
         return {**asdict(self), "data_dir": str(self.data_dir), "output_dir": str(self.output_dir)}
 
 
+# %% [markdown]
+# ### Supplied helper — `TimeBudget`
+#
+# Leave delivery time available; a running batch/fit cannot be interrupted safely.
+
+
+# %% [provided] [stage-1]
 class TimeBudget:
     """Leave delivery time available; a running batch/fit cannot be interrupted safely."""
 
@@ -163,6 +154,13 @@ class TimeBudget:
             raise TimeoutError(f"Delivery reserve reached before {stage}")
 
 
+# %% [markdown]
+# ### Supplied helper — `runtime_paths`
+#
+# Media stays on local disk; optional durable storage is an explicit destination.
+
+
+# %% [provided] [stage-1]
 def runtime_paths(
     *, runtime_dir: Path | None = None, persistent_dir: Path | None = None
 ) -> SimpleNamespace:
@@ -182,6 +180,13 @@ def runtime_paths(
     )
 
 
+# %% [markdown]
+# ### Supplied helper — `mount_google_drive`
+#
+# Call only when an explicitly configured Colab path uses Drive.
+
+
+# %% [provided] [stage-1]
 def mount_google_drive() -> None:
     """Call only when an explicitly configured Colab path uses Drive."""
     from google.colab import drive
@@ -189,6 +194,13 @@ def mount_google_drive() -> None:
     drive.mount("/content/drive")
 
 
+# %% [markdown]
+# ### Supplied helper — `stage_data`
+#
+# Copy a folder or extract a ZIP once, then train from the local destination.
+
+
+# %% [provided] [stage-1]
 def stage_data(source: Path | str, destination: Path | str) -> Path:
     """Copy a folder or extract a ZIP once, then train from the local destination."""
     source, destination = Path(source).resolve(), Path(destination).resolve()
@@ -208,32 +220,13 @@ def stage_data(source: Path | str, destination: Path | str) -> Path:
     return destination
 
 
-def sync_artifacts(source: Path | str, destination: Path | str | None) -> list[Path]:
-    """Copy the entire candidate, including encoders, preserving separate run folders."""
-    if destination is None:
-        return []
-    source, destination = Path(source).resolve(), Path(destination).resolve()
-    if (
-        destination == source
-        or destination.is_relative_to(source)
-        or source.is_relative_to(destination)
-    ):
-        raise ValueError("Output and backup folders must be separate")
-    copied = []
-    for path in source.rglob("*"):
-        if path.is_file() and not path.name.endswith(".tmp"):
-            target = destination / path.relative_to(source)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
-            try:
-                shutil.copy2(path, temporary)
-                temporary.replace(target)
-            finally:
-                temporary.unlink(missing_ok=True)
-            copied.append(target)
-    return copied
+# %% [markdown]
+# ### Supplied helper — `gpu_report`
+#
+# Inspect the actual runtime before choosing image size, batch size or precision.
 
 
+# %% [provided] [stage-1]
 def gpu_report() -> dict:
     """Inspect the actual runtime before choosing image size, batch size or precision."""
     if not torch.cuda.is_available():
@@ -247,45 +240,15 @@ def gpu_report() -> dict:
     }
 
 
-def evaluate_metric(name: str, truth: Any, prediction: Any, **kwargs: Any) -> float:
-    """Only the metrics used in this lesson; task-specific graders appear beside the model."""
-    from sklearn.metrics import accuracy_score, roc_auc_score
+# %% [markdown]
+# ### Configure this run
+#
+# Edit these values before proceeding. DATA_DIR points at your staged pack; choose a separate
+# empty folder for an online download. Keep model permission explicit, start with a small row/time
+# budget, and let the actual device report guide neural batch size. Each run writes to a new
+# candidate directory.
 
-    if name == "roc_auc":
-        return float(roc_auc_score(truth, prediction, **kwargs))
-    if name == "accuracy":
-        return float(accuracy_score(truth, prediction))
-    if name == "dice_mean_image":
-        y, p = np.asarray(truth, bool), np.asarray(prediction, bool)
-        if y.shape != p.shape or not y.size:
-            raise ValueError("Need aligned nonempty masks")
-        axes = tuple(range(1, y.ndim))
-        denominator = y.sum(axis=axes) + p.sum(axis=axes)
-        return float(
-            np.divide(
-                2 * (y & p).sum(axis=axes), denominator, out=np.ones(len(y)), where=denominator != 0
-            ).mean()
-        )
-    raise ValueError(f"Unsupported lesson metric: {name}")
-
-
-@torch.inference_mode()
-def predict_logits(model: nn.Module, loader: Iterable, *, device: str = "cpu") -> np.ndarray:
-    """Ordered, deterministic inference; BF16/FP16 on capable CUDA, FP32 on CPU."""
-    model.to(device).eval()
-    enabled = torch.device(device).type == "cuda"
-    dtype = torch.bfloat16 if enabled and torch.cuda.is_bf16_supported() else torch.float16
-    outputs = []
-    for batch in loader:
-        inputs = batch[0] if isinstance(batch, (tuple, list)) else batch
-        with torch.autocast(torch.device(device).type, dtype=dtype, enabled=enabled):
-            logits = model(inputs.to(device))
-        outputs.append(logits.float().cpu().numpy())
-    if not outputs:
-        raise ValueError("Inference loader is empty")
-    return np.concatenate(outputs)
-
-
+# %% [configuration] [stage-1]
 FAMILY, VARIANT = "03_toxic", "advanced"
 DATA_ARCHIVE, PERSISTENT_DIR = None, None
 if "google.colab" in sys.modules and any(
@@ -303,20 +266,26 @@ if DATA_ARCHIVE is not None:
 RUN_ID = f"{FAMILY}-{VARIANT}-{uuid4().hex[:8]}"
 OUTPUT = paths.output_dir / "learning" / RUN_ID
 DURABLE_OUTPUT = paths.persistent_dir / RUN_ID if paths.persistent_dir is not None else None
-PRETRAINED_ALLOWED, WEIGHT_PATH = False, None
-SEED, MAX_ROWS, IMAGE_SIZE, BATCH_SIZE, EPOCHS = 42, 6000, 128, 16, 3
+PRETRAINED_ALLOWED = False
+SEED, MAX_ROWS, BATCH_SIZE, EPOCHS = 42, 6000, 16, 3
 TIME_BUDGET_MINUTES, DELIVERY_RESERVE_MINUTES = 60, 10
 GROUP_COLUMN, TIME_COLUMN = "_text_group", None
 USE_IMBALANCE_WEIGHTS = False
-USE_HISTORY_FEATURES = False
-MODEL_NAME = "resnet18"
-IMAGE_SUFFIX = ".png"
-TEXT_MODEL_DIR, IMAGE_MODEL_CHECKPOINT, EMBEDDING_ARCHIVE = None, None, None
+MODEL_NAME = "bigru"
+
+# %% [markdown]
+# ### Configure this run
+#
+# Edit these values before proceeding. DATA_DIR points at your staged pack; choose a separate
+# empty folder for an online download. Keep model permission explicit, start with a small row/time
+# budget, and let the actual device report guide neural batch size. Each run writes to a new
+# candidate directory.
+
+# %% [configuration] [stage-1]
 ASSET_PROVENANCE = (
     ""  # exact asset/version/license; required when enabling local pretrained features
 )
 EMBEDDING_PATH, EMBEDDING_DIM, MAX_LENGTH = None, 64, 128
-THRESHOLD_GRID = (0.3, 0.4, 0.5, 0.6, 0.7)
 competition = CompetitionConfig(
     data_dir=DATA_DIR,
     output_dir=OUTPUT,
@@ -331,11 +300,12 @@ print(gpu_report())
 print("Local data:", DATA_DIR, "New candidate:", OUTPUT)
 
 # %% [markdown]
-# ## 1a. Download the practice dataset (optional, before the timed exercise)
+# ## 1a. Optional dataset acquisition
 #
 # The cell is skipped by default. For online preparation, first accept this competition's
 # rules on its Kaggle page and configure credentials using the
-# [official authentication guide](https://github.com/Kaggle/kaggle-cli/blob/main/docs/README.md#authentication).
+# [official authentication
+# guide](https://github.com/Kaggle/kaggle-cli/blob/main/docs/README.md#authentication).
 # Set DOWNLOAD_DATA=True below. Local uv sync includes the official Kaggle client. In a copied
 # notebook/Colab runtime without it, install only `kaggle>=2.2,<3` before running this cell;
 # do not install this project or replace Colab's torch/NumPy/CUDA stack.
@@ -351,9 +321,71 @@ print("Local data:", DATA_DIR, "New candidate:", OUTPUT)
 # checks the expected layout. On Kaggle itself, attach competition data in the notebook UI,
 # point DATA_DIR at its mounted folder, and leave this switch off. For restricted-room drills,
 # prepare data beforehand and keep this cell disabled. The training timer restarts afterward.
-#
 
-# %%
+# %% [markdown]
+# ### Supplied helper — `_json_default`
+#
+# Run this supplied definition before its callers. Its inputs and invariants are explained in this
+# section.
+
+
+# %% [provided] [stage-1a]
+def _json_default(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if is_dataclass(value):
+        return asdict(value)
+    if hasattr(value, "tolist"):
+        return value.tolist()
+    raise TypeError(f"Cannot serialize {type(value).__name__} as JSON")
+
+
+# %% [markdown]
+# ### Supplied helper — `_write`
+#
+# Run this supplied definition before its callers. Its inputs and invariants are explained in this
+# section.
+
+
+# %% [provided] [stage-1a]
+def _write(value: Any, path: Path | str, kind: str) -> Path:
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
+    try:
+        if kind == "json":
+            temporary.write_text(
+                json.dumps(
+                    value, default=_json_default, indent=2, ensure_ascii=False, allow_nan=False
+                ),
+                encoding="utf-8",
+            )
+        elif kind == "pickle":
+            with temporary.open("wb") as handle:
+                pickle.dump(value, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        else:
+            import torch
+
+            torch.save(value, temporary)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
+
+
+# %% [markdown]
+# ### Supplied helper — `save_json`
+#
+# Atomically save UTF-8 metadata, including paths, dataclasses, and NumPy values.
+
+
+# %% [provided] [stage-1a]
+def save_json(value: Any, path: Path | str) -> Path:
+    """Atomically save UTF-8 metadata, including paths, dataclasses, and NumPy values."""
+    return _write(value, path, "json")
+
+
+# %% [configuration] [stage-1a]
 import os
 import subprocess
 from getpass import getpass
@@ -366,7 +398,13 @@ DOWNLOAD_CACHE = DATA_DIR.parent / "_downloads" / KAGGLE_COMPETITION
 DOWNLOAD_TIMEOUT_SECONDS = 7200
 PROMPT_FOR_KAGGLE_TOKEN = "google.colab" in sys.modules
 
+# %% [markdown]
+# ### Supplied helper — `extract_dataset_zip`
+#
+# Extract data without allowing absolute paths, traversal or silent overwrites.
 
+
+# %% [provided] [stage-1a]
 def extract_dataset_zip(source: Path, destination: Path) -> None:
     """Extract data without allowing absolute paths, traversal or silent overwrites."""
     destination = Path(destination).resolve()
@@ -388,6 +426,13 @@ def extract_dataset_zip(source: Path, destination: Path) -> None:
                 shutil.copyfileobj(incoming, outgoing)
 
 
+# %% [markdown]
+# ### Supplied helper — `download_practice_data`
+#
+# Use the official CLI, then publish the complete extracted folder by renaming it.
+
+
+# %% [provided] [stage-1a]
 def download_practice_data(
     competition: str,
     destination: Path,
@@ -501,6 +546,7 @@ def download_practice_data(
     return destination
 
 
+# %% [provided] [stage-1a]
 if DOWNLOAD_DATA:
     if DATA_ARCHIVE is not None:
         raise ValueError("Choose either DATA_ARCHIVE staging or DOWNLOAD_DATA, then rerun setup")
@@ -516,19 +562,20 @@ source_marker = DATA_DIR / ".kaggle-source.json"
 if source_marker.is_file():
     save_json(json.loads(source_marker.read_text(encoding="utf-8")), OUTPUT / "data_source.json")
 print("Download enabled:", DOWNLOAD_DATA, "Dataset folder:", DATA_DIR)
-# Dataset acquisition is preparation time, not part of the measured training/delivery budget.
 budget = TimeBudget(TIME_BUDGET_MINUTES, reserve_minutes=DELIVERY_RESERVE_MINUTES)
 
 # %% [markdown]
-# ## 2. Load data and enforce the contract
+# ## 2. Understand and load the data contract
 #
-# Check schema and identity before fitting. A row is not always a prediction unit: detection has
-# several annotation rows per image, and matching has several records per product.
+# Each comment can have several of six independent labels. Return six probabilities per id in the
+# sample's exact label order. A row may have no positive label or several; the labels are not
+# mutually exclusive classes.
 #
-#
-#
+# Read the first rows, column names and actual shapes below. Expected: unique nonempty prediction
+# IDs; matching test/sample ID sets; a target schema that agrees with the official output. Dataset
+# size depends on your local files and MAX_ROWS.
 
-# %%
+# %% [worked] [stage-2]
 ID_COLUMN = "id"
 TARGET_COLUMNS = ["toxic", "severe_toxic", "obscene", "threat", "insult", "identity_hate"]
 train = pd.read_csv(DATA_DIR / "train.csv", converters={ID_COLUMN: str})
@@ -538,7 +585,6 @@ train["comment_text"] = train["comment_text"].fillna("")
 test["comment_text"] = test["comment_text"].fillna("")
 train["_text_group"] = train["comment_text"].str.strip().str.casefold()
 assert train[TARGET_COLUMNS].isin([0, 1]).all().all()
-
 if MAX_ROWS is not None and len(train) > MAX_ROWS:
     train = train.sample(n=MAX_ROWS, random_state=SEED).reset_index(drop=True)
 for name, frame in (("train", train), ("test", test), ("sample", sample)):
@@ -554,18 +600,35 @@ assert sample.columns.tolist() == [ID_COLUMN, *TARGET_COLUMNS]
 print(train.head(3).to_string(index=False))
 print("Shapes:", train.shape, test.shape, sample.shape)
 
-# %% [markdown]
-# ## 3. Inspect and visualize the data
-#
-# Write down three observations from these plots before revealing any solution: missingness,
-# examples that look wrong, and a possible leakage unit. Never select experiments using hidden
-# test labels.
-#
-# Inspect the longest texts and unusual character patterns. Preserve negation and useful
-# punctuation. Normalized duplicate text is grouped before splitting.
-#
+# %% [check] [stage-2]
+assert len(train) > 0 and len(test) == len(sample)
+assert train[ID_COLUMN].is_unique and sample[ID_COLUMN].is_unique
+print("Data-contract checks passed: prediction units and sample coverage.")
 
-# %%
+# %% [markdown]
+# ### Stop and explain
+#
+# What is the prediction unit, and which columns may enter the model?
+#
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
+#
+# Each comment can have several of six independent labels. Return six probabilities per id in the
+# sample's exact label order. A row may have no positive label or several; the labels are not
+# mutually exclusive classes.
+#
+# </details>
+
+# %% [markdown]
+# ## 3. Inspect examples and distributions
+#
+# Inspect the plotted examples before selecting a model. Write observations before reading the
+# next section.
+#
+# Which labels are rarest? How often do labels co-occur? Are empty or normalized duplicate
+# comments present? Do long comments get truncated by the proposed tokenizer?
+
+# %% [worked] [stage-3]
 lengths = train["comment_text"].str.len()
 print("Text length quantiles:", lengths.quantile([0, 0.5, 0.9, 0.99, 1]).to_dict())
 print("Repeated normalized texts:", train["_text_group"].duplicated().sum())
@@ -582,19 +645,36 @@ plt.show()
 plt.close(fig)
 
 # %% [markdown]
-# ## 4. Freeze a leakage-aware split
+# ### Stop and explain
 #
-# Keep these exact folds for baseline/advanced comparisons. Random stratification is only
-# appropriate for independent samples. Set a group or time column when the acquisition process
-# demands it; assert the chosen boundary.
+# Record three observations: one distribution issue, one suspicious example, and one possible
+# leakage source. What experiment does each justify?
 #
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
 #
+# Use the actual plots and rows; there is no fixed answer independent of your pack. Convert each
+# observation into a falsifiable check before spending training time.
 #
+# </details>
 
-# %%
+# %% [markdown]
+# ## 4. Build and test the validation split
+#
+# Keep normalized duplicate comments together. A group split is not automatically a multilabel
+# stratifier: explicitly check positive and negative support for every label in both folds.
+# Undefined AUROC must not be silently dropped.
+
+# %% [worked] [stage-4]
 from sklearn.model_selection import GroupShuffleSplit, StratifiedGroupKFold, train_test_split
 
+# %% [markdown]
+# ### Supplied helper — `SplitResult`
+#
+# Training/validation tables plus their original positional indexes.
 
+
+# %% [provided] [stage-4]
 @dataclass(slots=True)
 class SplitResult:
     """Training/validation tables plus their original positional indexes."""
@@ -605,6 +685,14 @@ class SplitResult:
     valid_indices: np.ndarray
 
 
+# %% [markdown]
+# ### Supplied helper — `_stratification_key`
+#
+# Run this supplied definition before its callers. Its inputs and invariants are explained in this
+# section.
+
+
+# %% [provided] [stage-4]
 def _stratification_key(frame: pd.DataFrame, targets: Sequence[str]) -> pd.Series:
     if not targets:
         raise ValueError("At least one target is required for stratification")
@@ -613,6 +701,13 @@ def _stratification_key(frame: pd.DataFrame, targets: Sequence[str]) -> pd.Serie
     return frame[list(targets)].astype(str).agg("|".join, axis=1)
 
 
+# %% [markdown]
+# ### Supplied helper — `make_split`
+#
+# Create a deterministic holdout with leakage-aware group and time options.
+
+
+# %% [provided] [stage-4]
 def make_split(
     frame: pd.DataFrame,
     *,
@@ -683,12 +778,57 @@ def make_split(
     )
 
 
-# >>> exercise: hold duplicate normalized comments on the same side of validation
-split = make_split(
-    train, group_column=GROUP_COLUMN, time_column=TIME_COLUMN, seed=SEED, valid_size=0.2
+# %% [markdown]
+# ### Worked component — `create_holdout`
+#
+# Input: a row-per-prediction table and its actual leakage columns. Return: the split record and
+# independent training/validation copies. The union must retain all rows; identities must not
+# cross folds.
+
+
+# %% [worked] [stage-4]
+def create_holdout(
+    frame: pd.DataFrame,
+    target_columns: Any = None,
+    group_column: str | None = None,
+    time_column: str | None = None,
+    seed: int = 42,
+) -> Any:
+    """Input: a row-per-prediction table and its actual leakage columns. Return: the split
+    record and independent training/validation copies. The union must retain all rows;
+    identities must not cross folds.
+    """
+    split = make_split(
+        frame,
+        target_columns=target_columns,
+        group_column=group_column,
+        time_column=time_column,
+        valid_size=0.2,
+        seed=seed,
+    )
+    tr, va = split.train.copy(), split.valid.copy()
+    return split, tr, va
+
+
+# %% [markdown]
+# **Check before continuing.** Predict the result, run the small test below, and use its assertion
+# message to locate an error. Expected: all assertions pass and the printed success message
+# appears. These checks do not fit the real candidate.
+
+# %% [check] [stage-4]
+toy_frame = pd.DataFrame({"id": range(12), "group": np.repeat(range(6), 2)})
+toy_split, toy_train, toy_valid = create_holdout(toy_frame, group_column="group", seed=7)
+assert len(toy_train) + len(toy_valid) == 12, "The split must retain every row"
+assert not set(toy_train["group"]) & set(toy_valid["group"]), "Repeated identities leaked"
+assert not set(toy_split.train_indices) & set(toy_split.valid_indices)
+toy_again = create_holdout(toy_frame, group_column="group", seed=7)[0]
+np.testing.assert_array_equal(toy_split.valid_indices, toy_again.valid_indices)
+print("Split checks passed: complete, group-disjoint and reproducible.")
+
+# %% [worked] [stage-4]
+split, tr, va = create_holdout(
+    train, target_columns=None, group_column=GROUP_COLUMN, time_column=TIME_COLUMN, seed=SEED
 )
-tr, va = split.train.copy(), split.valid.copy()
-# <<< exercise
 assert not set(tr[ID_COLUMN]) & set(va[ID_COLUMN])
 if GROUP_COLUMN:
     assert not set(tr[GROUP_COLUMN]) & set(va[GROUP_COLUMN])
@@ -696,19 +836,37 @@ if TIME_COLUMN:
     assert pd.to_datetime(tr[TIME_COLUMN]).max() < pd.to_datetime(va[TIME_COLUMN]).min()
 print("Fold sizes:", len(tr), len(va))
 
-# %% [markdown]
-# ## 5. Audit imbalance and choose a response
-#
-# Measure prevalence on the training fold. Choose the response according to the official score:
-# class weights, positive weights, coverage sampling or a log target are hypotheses. Compare
-# with the unweighted candidate on the same split. Never rebalance validation.
-#
-# This split is group-aware, not a multilabel stratifier. Each of the six labels must have
-# positive and negative cases in both folds. If support fails, use a larger pack or a justified
-# group-compatible multilabel splitter; do not silently drop a label from the score.
-#
+# %% [check] [stage-4]
+assert len(tr) > 0 and len(va) > 0
+assert not set(tr[ID_COLUMN]) & set(va[ID_COLUMN])
+print("Actual-fold checks passed: nonempty disjoint prediction IDs.")
 
-# %%
+# %% [markdown]
+# ### Stop and explain
+#
+# Would a random row split measure the generalization you need here? Identify the boundary that
+# would leak information.
+#
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
+#
+# Keep normalized duplicate comments together. A group split is not automatically a multilabel
+# stratifier: explicitly check positive and negative support for every label in both folds.
+# Undefined AUROC must not be silently dropped.
+#
+# </details>
+
+# %% [markdown]
+# ## 5. Measure imbalance and choose a response
+#
+# For label c, compute (N-positive_c)/positive_c from training comments. These independent ratios
+# can weight BCE or motivate balanced binary classifiers. Start unweighted and never oversample or
+# rebalance validation.
+#
+# $w_c=(N-n_c)/n_c$; $\mathrm{score}=\frac{1}{6}\sum_c\mathrm{AUROC}(y_c,p_c)$. Independent labels
+# require sigmoid/BCE, not a six-way softmax.
+
+# %% [worked] [stage-5]
 counts = tr[TARGET_COLUMNS].sum()
 print("Training positives:", counts.to_dict())
 for name, frame in (("train", tr), ("validation", va)):
@@ -716,11 +874,42 @@ for name, frame in (("train", tr), ("validation", va)):
         raise ValueError(
             f"{name} lacks both outcomes for a label; AUC is undefined. Inspect split/support."
         )
-# >>> exercise: derive positive weights from the training fold only
-ratios = (len(tr) - counts) / counts
-positive_weights = torch.tensor(ratios.to_numpy(), dtype=torch.float32)
-class_weight = "balanced" if USE_IMBALANCE_WEIGHTS else None
-# <<< exercise
+
+# %% [markdown]
+# ### Worked component — `multilabel_imbalance`
+#
+# Input: positive training counts in target-column order, row count and weighting flag. Return:
+# per-label ratios, float32 BCE positive weights [C] and sklearn class_weight.
+
+
+# %% [worked] [stage-5]
+def multilabel_imbalance(counts: pd.Series, training_rows: int, use_weights: bool) -> Any:
+    """Input: positive training counts in target-column order, row count and weighting flag.
+    Return: per-label ratios, float32 BCE positive weights [C] and sklearn class_weight.
+    """
+    ratios = (training_rows - counts) / counts
+    positive_weights = torch.tensor(ratios.to_numpy(), dtype=torch.float32)
+    class_weight = "balanced" if use_weights else None
+    return ratios, positive_weights, class_weight
+
+
+# %% [markdown]
+# **Check before continuing.** Predict the result, run the small test below, and use its assertion
+# message to locate an error. Expected: all assertions pass and the printed success message
+# appears. These checks do not fit the real candidate.
+
+# %% [check] [stage-5]
+toy_counts = pd.Series([2, 4], index=["rare", "common"])
+toy_ratios, toy_weights, toy_class_weight = multilabel_imbalance(toy_counts, 8, False)
+np.testing.assert_allclose(toy_ratios, [3, 1])
+np.testing.assert_allclose(toy_weights.numpy(), [3, 1])
+assert toy_class_weight is None and toy_weights.shape == (2,)
+print("Multilabel checks passed: independent positive weights remain in target-column order.")
+
+# %% [worked] [stage-5]
+ratios, positive_weights, class_weight = multilabel_imbalance(
+    counts, len(tr), USE_IMBALANCE_WEIGHTS
+)
 print(
     "Response:", "training-fold weights" if USE_IMBALANCE_WEIGHTS else "unweighted first candidate"
 )
@@ -731,26 +920,68 @@ plt.show()
 plt.close()
 
 # %% [markdown]
-# ## 6. Build features or datasets
+# ### Stop and explain
 #
-# Inspect one transformed example or batch. Explain its shape, range, label encoding and
-# train/validation/test consistency. Fitted preprocessing sees the training fold only.
+# Does changing training weights also change the official score or validation distribution? What
+# would justify enabling the response?
 #
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
 #
+# For label c, compute (N-positive_c)/positive_c from training comments. These independent ratios
+# can weight BCE or motivate balanced binary classifiers. Start unweighted and never oversample or
+# rebalance validation.
 #
+# </details>
 
-# %%
+# %% [markdown]
+# ## 6. Build features or one correct batch
+#
+# The BiGRU route builds a training-only vocabulary, pads/truncates token sequences and optionally
+# loads explicitly permitted local embeddings. Inspect integer IDs, padding, sequence lengths and
+# six-target batch alignment.
+
+# %% [markdown]
+# ### Worked component — `predict_logits`
+#
+# Ordered, deterministic inference; BF16/FP16 on capable CUDA, FP32 on CPU.
+
+
+# %% [worked] [stage-6]
+@torch.inference_mode()
+def predict_logits(model: nn.Module, loader: Iterable, *, device: str = "cpu") -> np.ndarray:
+    """Ordered, deterministic inference; BF16/FP16 on capable CUDA, FP32 on CPU."""
+    model.to(device).eval()
+    enabled = torch.device(device).type == "cuda"
+    dtype = torch.bfloat16 if enabled and torch.cuda.is_bf16_supported() else torch.float16
+    outputs = []
+    for batch in loader:
+        inputs = batch[0] if isinstance(batch, (tuple, list)) else batch
+        with torch.autocast(torch.device(device).type, dtype=dtype, enabled=enabled):
+            logits = model(inputs.to(device))
+        outputs.append(logits.float().cpu().numpy())
+    if not outputs:
+        raise ValueError("Inference loader is empty")
+    return np.concatenate(outputs)
+
+
+# %% [worked] [stage-6]
 from collections import Counter
 
 from torch.utils.data import TensorDataset
 
-# >>> exercise: build the vocabulary only from training-fold text
 counts_words = Counter(word for text in tr["comment_text"] for word in text.lower().split())
 vocabulary = {"<pad>": 0, "<unk>": 1}
 vocabulary.update({word: i + 2 for i, (word, _) in enumerate(counts_words.most_common(20000))})
 
+# %% [markdown]
+# ### Worked component — `encode`
+#
+# Run this supplied definition before its callers. Its inputs and invariants are explained in this
+# section.
 
-# <<< exercise
+
+# %% [worked] [stage-6]
 def encode(texts):
     rows = []
     for text in texts:
@@ -759,6 +990,14 @@ def encode(texts):
     return torch.tensor(rows, dtype=torch.long)
 
 
+# %% [markdown]
+# ### Worked component — `loader_for`
+#
+# Run this supplied definition before its callers. Its inputs and invariants are explained in this
+# section.
+
+
+# %% [worked] [stage-6]
 def loader_for(frame, training=False):
     targets = (
         frame[TARGET_COLUMNS].to_numpy(dtype=np.float32)
@@ -769,27 +1008,118 @@ def loader_for(frame, training=False):
     return DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=training, num_workers=0)
 
 
+# %% [worked] [stage-6]
 train_loader, valid_loader = loader_for(tr, True), loader_for(va)
 save_json(vocabulary, OUTPUT / "vocabulary.json")
 print("Token tensor:", encode(tr["comment_text"].head(2)).shape)
 
 # %% [markdown]
-# ## 7. Define the model and loss
+# ### Stop and explain
 #
-# State why the output dimension and loss fit this prediction contract. First verify the
-# simplest model. Pretrained initialization is disabled unless the exact local asset is
-# permitted.
+# State the feature/batch shapes and the exact point at which preprocessing is fitted. What
+# happens to a previously unseen validation input?
 #
-# Study the historical winner's embeddings/BiGRU idea. The default has random embeddings and a
-# small hidden state to run offline; that is not evidence of leaderboard-level performance. An
-# optional local NPZ has tokens [V] and vectors [V,EMBEDDING_DIM], loaded only with explicit
-# permission/provenance.
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
 #
+# The BiGRU route builds a training-only vocabulary, pads/truncates token sequences and optionally
+# loads explicitly permitted local embeddings. Inspect integer IDs, padding, sequence lengths and
+# six-target batch alignment.
+#
+# </details>
 
-# %%
+# %% [markdown]
+# ## 7. Connect outputs, loss and official metric
+#
+# The two-layer bidirectional GRU encodes word order and emits six raw logits. BCEWithLogitsLoss
+# applies independent sigmoid objectives. Pretrained embeddings are optional legal local assets,
+# not an automatic download.
+
+# %% [markdown]
+# ### Supplied helper — `save_torch_state`
+#
+# Atomically save torch state without importing torch until this function is used.
+
+
+# %% [provided] [stage-7]
+def save_torch_state(value: Any, path: Path | str) -> Path:
+    """Atomically save torch state without importing torch until this function is used."""
+    return _write(value, path, "torch")
+
+
+# %% [markdown]
+# ### Supplied helper — `sync_artifacts`
+#
+# Copy the entire candidate, including encoders, preserving separate run folders.
+
+
+# %% [provided] [stage-7]
+def sync_artifacts(source: Path | str, destination: Path | str | None) -> list[Path]:
+    """Copy the entire candidate, including encoders, preserving separate run folders."""
+    if destination is None:
+        return []
+    source, destination = Path(source).resolve(), Path(destination).resolve()
+    if (
+        destination == source
+        or destination.is_relative_to(source)
+        or source.is_relative_to(destination)
+    ):
+        raise ValueError("Output and backup folders must be separate")
+    copied = []
+    for path in source.rglob("*"):
+        if path.is_file() and not path.name.endswith(".tmp"):
+            target = destination / path.relative_to(source)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+            try:
+                shutil.copy2(path, temporary)
+                temporary.replace(target)
+            finally:
+                temporary.unlink(missing_ok=True)
+            copied.append(target)
+    return copied
+
+
+# %% [markdown]
+# ### Worked component — `evaluate_metric`
+#
+# Only the metrics used in this lesson; task-specific graders appear beside the model.
+
+
+# %% [worked] [stage-7]
+def evaluate_metric(name: str, truth: Any, prediction: Any, **kwargs: Any) -> float:
+    """Only the metrics used in this lesson; task-specific graders appear beside the model."""
+    from sklearn.metrics import accuracy_score, roc_auc_score
+
+    if name == "roc_auc":
+        return float(roc_auc_score(truth, prediction, **kwargs))
+    if name == "accuracy":
+        return float(accuracy_score(truth, prediction))
+    if name == "dice_mean_image":
+        y, p = np.asarray(truth, bool), np.asarray(prediction, bool)
+        if y.shape != p.shape or not y.size:
+            raise ValueError("Need aligned nonempty masks")
+        axes = tuple(range(1, y.ndim))
+        denominator = y.sum(axis=axes) + p.sum(axis=axes)
+        return float(
+            np.divide(
+                2 * (y & p).sum(axis=axes), denominator, out=np.ones(len(y)), where=denominator != 0
+            ).mean()
+        )
+    raise ValueError(f"Unsupported lesson metric: {name}")
+
+
+# %% [worked] [stage-7]
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
+# %% [markdown]
+# ### Worked component — `ToxicGRU`
+#
+# Run this supplied definition before its callers. Its inputs and invariants are explained in this
+# section.
 
+
+# %% [worked] [stage-7]
 class ToxicGRU(nn.Module):
     def __init__(self):
         super().__init__()
@@ -811,6 +1141,7 @@ class ToxicGRU(nn.Module):
         return self.head(torch.cat([mean, maximum], dim=1))
 
 
+# %% [worked] [stage-7]
 model = ToxicGRU()
 if EMBEDDING_PATH is not None:
     if not PRETRAINED_ALLOWED or not ASSET_PROVENANCE:
@@ -827,26 +1158,93 @@ if EMBEDDING_PATH is not None:
         "Local embedding vocabulary coverage:",
         sum(word in lookup for word in vocabulary) / len(vocabulary),
     )
-# >>> exercise: choose independent BCE logits loss and training-only positive weights
 criterion = nn.BCEWithLogitsLoss(pos_weight=positive_weights if USE_IMBALANCE_WEIGHTS else None).to(
     competition.device
 )
-# <<< exercise
 MODEL_DESCRIPTION = "two-layer bidirectional GRU; local embeddings only when configured"
 
 # %% [markdown]
-# ## 8. Train and preserve the candidate
+# ### Worked component — `score_multilabel`
 #
-# First fit a tiny subset as a debugging drill; rebuild before the real-fold experiment. Main
-# torch lessons define their small training loop directly below, including precision, time
-# reserves and atomic best checkpoints. For sklearn fit the full preprocessing pipeline together.
-#
-#
-#
-
-# %%
+# Input: label table, [N,C] probabilities and ordered target names. Return all label AUCs and
+# their unweighted mean. Never silently omit a label or threshold its scores.
 
 
+# %% [worked] [stage-7]
+def score_multilabel(truth: pd.DataFrame, predictions: np.ndarray, targets: Sequence[str]) -> Any:
+    """Input: label table, [N,C] probabilities and ordered target names. Return all label AUCs
+    and their unweighted mean. Never silently omit a label or threshold its scores.
+    """
+    per_label_auc = {
+        label: evaluate_metric("roc_auc", truth[label], predictions[:, index])
+        for index, label in enumerate(targets)
+    }
+    validation_score = float(np.mean(list(per_label_auc.values())))
+    return per_label_auc, validation_score
+
+
+# %% [markdown]
+# **Check before continuing.** Predict the result, run the small test below, and use its assertion
+# message to locate an error. Expected: all assertions pass and the printed success message
+# appears. These checks do not fit the real candidate.
+
+# %% [check] [stage-7]
+toy_truth = pd.DataFrame({"first": [0, 0, 1, 1], "second": [0, 0, 1, 1]})
+toy_predictions = np.array([[0.1, 0.9], [0.2, 0.8], [0.8, 0.2], [0.9, 0.1]])
+toy_per_label, toy_score = score_multilabel(toy_truth, toy_predictions, ["first", "second"])
+assert toy_per_label == {"first": 1.0, "second": 0.0} and toy_score == 0.5
+print("Multilabel AUROC checks passed: each label is scored before unweighted averaging.")
+
+# %% [markdown]
+# **Actual model/batch compatibility.** Run an evaluation forward pass before full training.
+# Expected: finite logits with the stated batch/output dimensions. Restore the model's previous
+# mode afterward.
+
+# %% [check] [stage-7]
+was_training = model.training
+model.eval()
+with torch.no_grad():
+    example_inputs, example_targets = next(iter(valid_loader))
+    example_inputs = example_inputs[:2].to(next(model.parameters()).device)
+    example_logits = model(example_inputs)
+    assert tuple(example_logits.shape) == (len(example_inputs), len(TARGET_COLUMNS)), (
+        "Model outputs do not match the task contract"
+    )
+    assert torch.isfinite(example_logits).all()
+model.train(was_training)
+print("Actual batch/model compatibility passed:", tuple(example_logits.shape))
+
+# %% [markdown]
+# ### Stop and explain
+#
+# Explain the output shape, loss and prediction decoding without reading the implementation. Which
+# convention would silently produce an invalid score?
+#
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
+#
+# The two-layer bidirectional GRU encodes word order and emits six raw logits. BCEWithLogitsLoss
+# applies independent sigmoid objectives. Pretrained embeddings are optional legal local assets,
+# not an automatic download. Compute AUROC separately for every target and take their unweighted
+# mean. Inspect per-label failures and rare-label support. A strong common label cannot substitute
+# for a missing rare-label score.
+#
+# </details>
+
+# %% [markdown]
+# ## 8. Train and preserve a recoverable candidate
+#
+# Fit vectorization and all binary targets together, or train the GRU with six float targets.
+# Check one batch and preserve vocabulary, preprocessing, target order and the best candidate
+# before increasing epochs.
+
+# %% [markdown]
+# ### Supplied helper — `TrainerConfig`
+#
+# Small lesson loop: AdamW, one step per batch, no scheduler.
+
+
+# %% [provided] [stage-8]
 @dataclass
 class TrainerConfig:
     """Small lesson loop: AdamW, one step per batch, no scheduler."""
@@ -859,6 +1257,13 @@ class TrainerConfig:
     patience: int = 2
 
 
+# %% [markdown]
+# ### Supplied helper — `Trainer`
+#
+# Visible training loop: validate globally, keep the best, reload before returning.
+
+
+# %% [provided] [stage-8]
 class Trainer:
     """Visible training loop: validate globally, keep the best, reload before returning."""
 
@@ -973,6 +1378,7 @@ class Trainer:
         return history
 
 
+# %% [worked] [stage-8]
 started = perf_counter()
 training = TrainerConfig(
     epochs=EPOCHS,
@@ -982,7 +1388,6 @@ training = TrainerConfig(
     scheduler="none",
     patience=2,
 )
-# >>> exercise: decode every logit independently and select using global multilabel AUROC
 trainer = Trainer(
     model,
     criterion,
@@ -995,9 +1400,10 @@ trainer = Trainer(
     backup_dir=DURABLE_OUTPUT,
 )
 history = trainer.fit(train_loader, valid_loader)
-# <<< exercise
 checkpoint_path = trainer.checkpoint_path
 fit_seconds = perf_counter() - started
+
+# %% [worked] [stage-8]
 validation_predictions = (
     torch.from_numpy(predict_logits(model, valid_loader, device=competition.device))
     .sigmoid()
@@ -1005,26 +1411,35 @@ validation_predictions = (
 )
 selected_threshold = 0.5
 
-# %% [markdown]
-# ## 9. Validate, inspect errors and compare cost
-#
-# Use all validation predictions for the exact score. Inspect individual mistakes and
-# minority/group performance; the diagnostic metric does not replace the official metric. Keep a
-# score/runtime ledger before choosing more complexity.
-#
-# AUROC measures ranking within each label. A .5 threshold is only an optional diagnostic
-# decision boundary. Label-wise calibration or thresholds cannot change the required probability
-# submission into hard labels.
-#
+# %% [check] [stage-8]
+assert checkpoint_path.is_file(), "No saved candidate is available for inference"
+assert np.isfinite(fit_seconds) and fit_seconds >= 0
+print("Candidate checks passed: persisted artifact and measured fit time.")
 
-# %%
-# >>> exercise: average six independently computed AUC values, never threshold for AUROC
-per_label_auc = {
-    label: evaluate_metric("roc_auc", va[label], validation_predictions[:, index])
-    for index, label in enumerate(TARGET_COLUMNS)
-}
-validation_score = float(np.mean(list(per_label_auc.values())))
-# <<< exercise
+# %% [markdown]
+# ### Stop and explain
+#
+# What evidence proves the saved artifact can reproduce inference? Which training state is not
+# promised by this reload?
+#
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
+#
+# Keep architecture/preprocessing, label order and best weights together, then compare reloaded
+# validation predictions. This lesson preserves inference recovery, not an exact continuation of
+# optimizer/scaler/random state.
+#
+# </details>
+
+# %% [markdown]
+# ## 9. Interpret validation and compare experiments
+#
+# Compute AUROC separately for every target and take their unweighted mean. Inspect per-label
+# failures and rare-label support. A strong common label cannot substitute for a missing
+# rare-label score.
+
+# %% [worked] [stage-9]
+per_label_auc, validation_score = score_multilabel(va, validation_predictions, TARGET_COLUMNS)
 print("Official mean AUC:", validation_score, "Per label:", per_label_auc)
 errors = va[[ID_COLUMN, *TARGET_COLUMNS]].copy()
 errors["mean_absolute_error"] = abs(va[TARGET_COLUMNS].to_numpy() - validation_predictions).mean(1)
@@ -1037,20 +1452,33 @@ plt.savefig(OUTPUT / "validation.png")
 plt.show()
 plt.close()
 
+# %% [check] [stage-9]
+assert np.isfinite(validation_score), "Selection requires a finite official score"
+print("Validation check passed. Compare this score and runtime with the baseline ledger.")
+
 # %% [markdown]
-# ## 10. Reload and run complete inference
+# ### Stop and explain
 #
-# Rebuild or reload the saved candidate before test inference. Preserve ID order through the
-# loader, then align to the sample by ID. Check that reloaded validation predictions agree. This
-# is inference recovery, not exact training continuation.
+# What is the next single experiment, and what result would make you reject it?
 #
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
 #
+# Compare TF-IDF against the GRU on identical comment groups. Record per-label AUROC, macro AUROC,
+# truncation frequency and total runtime. Larger sequence length must justify its memory and
+# latency cost.
 #
+# </details>
 
-# %%
+# %% [markdown]
+# ## 10. Reload and infer every test item
+#
+# Reload the fitted text pipeline or saved vocabulary/model and reproduce validation
+# probabilities. Infer all test comments without fitting vocabulary or changing truncation. Assert
+# finite [N,6] probabilities in [0,1].
 
+# %% [worked] [stage-10]
 started = perf_counter()
-# >>> exercise: rebuild from the saved vocabulary and own best checkpoint
 vocabulary = json.loads((OUTPUT / "vocabulary.json").read_text(encoding="utf-8"))
 restored = ToxicGRU().to(competition.device)
 restored.load_state_dict(
@@ -1068,27 +1496,54 @@ test_predictions = (
     .sigmoid()
     .numpy()
 )
-# <<< exercise
 assert test_predictions.shape == (len(test), 6)
 assert (
     np.isfinite(test_predictions).all()
     and ((0 <= test_predictions) & (test_predictions <= 1)).all()
 )
 output_values = {label: test_predictions[:, i] for i, label in enumerate(TARGET_COLUMNS)}
+
+# %% [worked] [stage-10]
 inference_seconds = perf_counter() - started
 
+# %% [check] [stage-10]
+assert set(output_values) == set(sample.columns) - {ID_COLUMN}
+assert all(len(values) == len(test) for values in output_values.values())
+print("Inference checks passed: every test item has the required output columns.")
+
 # %% [markdown]
-# ## 11. Validate the submission and persist the recipe
+# ### Stop and explain
 #
-# Validate the on-disk UTF-8 file, expected columns, ID order and task-specific value
-# constraints. Keep source, preprocessing, fold IDs, labels, thresholds, score and runtime with
-# the selected artifact. A checked CSV is not proof of upload acceptance.
+# Can this saved candidate handle every private input without refitting or downloading anything?
+# Which assets must travel with it?
 #
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
 #
+# Reload the fitted text pipeline or saved vocabulary/model and reproduce validation
+# probabilities. Infer all test comments without fitting vocabulary or changing truncation. Assert
+# finite [N,6] probabilities in [0,1].
 #
+# </details>
+
+# %% [markdown]
+# ## 11. Deliver and verify the submission
+#
+# Each comment can have several of six independent labels. Return six probabilities per id in the
+# sample's exact label order. A row may have no positive label or several; the labels are not
+# mutually exclusive classes.
+#
+# Write the CSV, read it back, and verify IDs, columns, row count, missing values and allowed
+# prediction values before saving the complete recipe. A local check does not confirm organizer
+# upload acceptance.
+
+# %% [markdown]
+# ### Supplied helper — `SubmissionValidation`
+#
+# Validation errors and non-fatal warnings for a candidate submission.
 
 
-# %%
+# %% [provided] [stage-11]
 @dataclass(slots=True)
 class SubmissionValidation:
     """Validation errors and non-fatal warnings for a candidate submission."""
@@ -1103,6 +1558,16 @@ class SubmissionValidation:
             raise ValueError("Invalid submission: " + "; ".join(self.errors))
 
 
+# %% [markdown]
+# ### Supplied helper — `build_submission`
+#
+# Copy the sample and optionally align predictions using unique (possibly composite) IDs.
+#
+# Without IDs, predictions must already be in sample order. Prefer explicit IDs for inference.
+# Alignment rejects missing, duplicate, extra, or absent keys rather than guessing row order.
+
+
+# %% [provided] [stage-11]
 def build_submission(
     sample: pd.DataFrame,
     predictions: Mapping[str, Sequence[object]],
@@ -1153,6 +1618,13 @@ def build_submission(
     return submission
 
 
+# %% [markdown]
+# ### Supplied helper — `validate_submission`
+#
+# Check schema, row count, ID order, missing values, and optional allowed labels.
+
+
+# %% [provided] [stage-11]
 def validate_submission(
     submission: pd.DataFrame,
     sample: pd.DataFrame,
@@ -1198,6 +1670,13 @@ def validate_submission(
     return SubmissionValidation(valid=not errors, errors=errors, warnings=warnings)
 
 
+# %% [markdown]
+# ### Supplied helper — `write_submission`
+#
+# Validate then atomically write a UTF-8 CSV submission.
+
+
+# %% [provided] [stage-11]
 def write_submission(
     submission: pd.DataFrame,
     path: Path | str,
@@ -1223,6 +1702,14 @@ def write_submission(
     return destination
 
 
+# %% [markdown]
+# ### Supplied helper — `_mapping`
+#
+# Run this supplied definition before its callers. Its inputs and invariants are explained in this
+# section.
+
+
+# %% [provided] [stage-11]
 def _mapping(value: Any) -> Mapping[str, Any]:
     if is_dataclass(value):
         return asdict(value)
@@ -1231,6 +1718,13 @@ def _mapping(value: Any) -> Mapping[str, Any]:
     raise TypeError("Expected a dataclass or mapping")
 
 
+# %% [markdown]
+# ### Supplied helper — `technical_report`
+#
+# Render the standard competition handoff report as Markdown text.
+
+
+# %% [provided] [stage-11]
 def technical_report(
     *,
     task: str,
@@ -1269,6 +1763,13 @@ def technical_report(
     return "\n".join(lines) + "\n"
 
 
+# %% [markdown]
+# ### Supplied helper — `write_technical_report`
+#
+# Write a UTF-8 technical report, creating its parent directory.
+
+
+# %% [provided] [stage-11]
 def write_technical_report(content: str, path: Path | str) -> Path:
     """Write a UTF-8 technical report, creating its parent directory."""
     destination = Path(path)
@@ -1277,6 +1778,13 @@ def write_technical_report(content: str, path: Path | str) -> Path:
     return destination
 
 
+# %% [markdown]
+# ### Supplied helper — `record_run`
+#
+# Save configuration/fold positions and a matching human-readable technical report.
+
+
+# %% [provided] [stage-11]
 def record_run(
     output_dir: Path | str,
     *,
@@ -1324,13 +1832,66 @@ def record_run(
     return write_technical_report(report, root / "technical_report.md")
 
 
-# >>> exercise: align predictions to sample IDs and validate the complete file
-submission = build_submission(
-    sample, output_values, prediction_ids=test[ID_COLUMN], id_columns=ID_COLUMN
+# %% [markdown]
+# ### Worked component — `deliver_submission`
+#
+# Input: sample template, named predictions, prediction IDs, key-column name and output path.
+# Return: ID-aligned checked frame and saved CSV path. Reject duplicated, missing or extra
+# prediction keys.
+
+
+# %% [worked] [stage-11]
+def deliver_submission(
+    sample_frame: pd.DataFrame,
+    predictions: Mapping[str, Sequence[object]],
+    prediction_ids: Sequence[object],
+    id_column: str,
+    output_path: Path,
+) -> Any:
+    """Input: sample template, named predictions, prediction IDs, key-column name and output
+    path. Return: ID-aligned checked frame and saved CSV path. Reject duplicated, missing or
+    extra prediction keys.
+    """
+    submission = build_submission(
+        sample_frame, predictions, prediction_ids=prediction_ids, id_columns=id_column
+    )
+    validate_submission(submission, sample_frame, id_columns=id_column).raise_for_errors()
+    destination = write_submission(submission, output_path)
+    return submission, destination
+
+
+# %% [markdown]
+# **Check before continuing.** Predict the result, run the small test below, and use its assertion
+# message to locate an error. Expected: all assertions pass and the printed success message
+# appears. These checks do not fit the real candidate.
+
+# %% [check] [stage-11]
+toy_sample = pd.DataFrame({"key": ["001", "NA"], "prediction": [0.0, 0.0]})
+toy_submission, toy_path = deliver_submission(
+    toy_sample, {"prediction": [0.8, 0.2]}, ["NA", "001"], "key", OUTPUT / "checks" / "delivery.csv"
 )
-validate_submission(submission, sample, id_columns=ID_COLUMN).raise_for_errors()
-destination = write_submission(submission, OUTPUT / "submission.csv")
-# <<< exercise
+assert toy_submission["key"].tolist() == ["001", "NA"], "Preserve literal IDs and sample order"
+np.testing.assert_allclose(toy_submission["prediction"], [0.2, 0.8])
+toy_loaded = pd.read_csv(toy_path, converters={"key": str}, keep_default_na=False)
+assert toy_loaded["key"].tolist() == ["001", "NA"]
+try:
+    deliver_submission(
+        toy_sample,
+        {"prediction": [0.2, 0.8]},
+        ["001", "001"],
+        "key",
+        OUTPUT / "checks" / "invalid.csv",
+    )
+except ValueError:
+    pass
+else:
+    raise AssertionError("Duplicate prediction IDs must be rejected, not guessed")
+print("Delivery checks passed: shuffled/literal IDs and duplicate rejection.")
+
+# %% [worked] [stage-11]
+submission, destination = deliver_submission(
+    sample, output_values, test[ID_COLUMN], ID_COLUMN, OUTPUT / "submission.csv"
+)
 roundtrip = pd.read_csv(
     destination, converters={ID_COLUMN: str}, keep_default_na=False, float_precision="round_trip"
 )
@@ -1342,25 +1903,26 @@ save_json(
     {"train_ids": tr[ID_COLUMN].tolist(), "validation_ids": va[ID_COLUMN].tolist()},
     OUTPUT / "fold_ids.json",
 )
+
+# %% [worked] [stage-11]
 save_json(
     {
         "epochs": EPOCHS,
         "batch_size": BATCH_SIZE,
         "seed": SEED,
         "max_rows": MAX_ROWS,
-        "image_size": IMAGE_SIZE,
         "model_name": MODEL_NAME,
         "max_length": MAX_LENGTH,
         "embedding_dim": EMBEDDING_DIM,
         "imbalance_weights": USE_IMBALANCE_WEIGHTS,
-        "history_features": USE_HISTORY_FEATURES,
         "pretrained_allowed": PRETRAINED_ALLOWED,
-        "initial_weight_path": WEIGHT_PATH,
         "asset_provenance": ASSET_PROVENANCE,
         "trainer": globals().get("training"),
     },
     OUTPUT / "lesson_config.json",
 )
+
+# %% [worked] [stage-11]
 record_run(
     OUTPUT,
     task=FAMILY,
@@ -1375,7 +1937,6 @@ record_run(
     inference_options={
         "threshold": float(selected_threshold),
         "label_order": TARGET_COLUMNS,
-        "image_size": IMAGE_SIZE,
         "max_length": MAX_LENGTH,
         "model_name": MODEL_NAME,
         "asset_provenance": ASSET_PROVENANCE,
@@ -1387,6 +1948,8 @@ record_run(
         f"Imbalance weights enabled: {USE_IMBALANCE_WEIGHTS}",
     ],
 )
+
+# %% [worked] [stage-11]
 pd.DataFrame(
     [
         {
@@ -1399,8 +1962,51 @@ pd.DataFrame(
         }
     ]
 ).to_csv(OUTPUT / "comparison_row.csv", index=False)
-# Save your edited notebook/source alongside this folder before transferring the bundle.
 copied = sync_artifacts(OUTPUT, DURABLE_OUTPUT)
 print("Checked local CSV:", destination, "Durable files copied:", len(copied))
 
-# ruff: noqa: E402
+# %% [check] [stage-11]
+assert destination.is_file()
+assert submission[ID_COLUMN].tolist() == sample[ID_COLUMN].tolist()
+print("Delivery complete. Next: restart inference, then attempt the reconstruction task.")
+
+# %% [markdown]
+# ### Stop and explain
+#
+# Which ID-order or encoding mistake would survive a plausible-looking preview? What did the
+# on-disk round trip prove?
+#
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
+#
+# Shuffled sample IDs and literal strings such as 001/NA require explicit alignment and CSV
+# parsing. Readback checks the delivered file's schema/order/values; official task semantics and
+# upload acceptance still need separate confirmation.
+#
+# </details>
+
+# %% [markdown]
+# ## Transfer and closed-book reconstruction
+#
+# A new pack has three independent labels, duplicate comments and very long messages. Update
+# output dimension, target order, group split and truncation audit, then prove that metric
+# averaging still handles all labels.
+#
+# 1. Close the reference notebook and create an empty personal notebook.
+# 2. Rebuild the data contract, split, features/model, fit, official metric and submission path.
+# 3. Deliver a checked small-pack CSV within 45–60 minutes, then reload it in a fresh session.
+# 4. Record elapsed time, hints, bugs and the first function you could not reconstruct.
+# 5. Rebuild that function the next day with a different schema or seed.
+#
+# For the 2k assistant, send one function signature, input/output shapes and one failing toy test.
+# Ask for an explanation or correction of that function only. Keep the rest of the notebook
+# outside the prompt.
+#
+# ### Controlled comparison
+#
+# Compare TF-IDF against the GRU on identical comment groups. Record per-label AUROC, macro AUROC,
+# truncation frequency and total runtime. Larger sequence length must justify its memory and
+# latency cost.
+#
+# A first correct submission is the readiness gate. Advanced complexity is selected only after an
+# honest metric/runtime comparison; no test fitting or model-weight permission is implied.

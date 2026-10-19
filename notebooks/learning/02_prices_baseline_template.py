@@ -11,9 +11,9 @@
 # [Primary solution
 # evidence](https://www.kaggle.com/code/serigne/stacked-regressions-top-4-on-leaderboard)
 #
-# The author's notebook is titled Top 4% and studies stacked regressions. This is historical
-# author-reported evidence, not a current winning rank. This lesson implements a smaller
-# train-fold stack; it is an advanced study route, not a verified global SOTA.
+# The linked stacked-regression notebook is historical, author-reported evidence. This baseline
+# fits Ridge on natural-log prices; the advanced companion studies a reduced OOF stack. Neither is
+# a verified global SOTA reproduction.
 #
 # **Watch for:** Use log(price), not a similar log1p metric; never remove validation outliers to
 # improve the score.
@@ -28,26 +28,47 @@
 # weights or real Kaggle data are bundled. Keep grading answers closed. Use only explicitly
 # permitted resources. Internet/prepared-code access is not assumed on contest day.
 #
-# Fill only the TODO blocks. Every code cell is followed by a closed Reveal expected code
-# section. Attempt, run, then reveal; equivalent correct implementations are welcome. Record
-# hints needed. Setup/configuration is supplied.
+# Complete the named exercises and their nearby checks in order. Setup and safety helpers are
+# supplied.
 #
 # After the lesson, close both notebooks and rebuild the essential route from memory. See the
 # repository's blank-notebook playbook for the final transfer test.
 #
+# ## How to use this lesson
+#
+# Complete one named exercise, run its nearby checks, then interpret the result. Supplied cells
+# contain setup or integration; edit only configuration or marked exercise bodies. Every baseline
+# code cell retains a collapsed full reference immediately afterward. Use Hint 1, then Hint 2,
+# before opening a reference.
+#
+# By the end you should be able to state the data/metric contract, choose a legal split, construct
+# one correct model input, validate a saved candidate and deliver an ID-aligned file. Mini-checks
+# use tiny separate examples or the current training batch; they do not certify real-data quality.
+#
+#  | Stage | Goal |
+# |---|---|
+# | 1 | Environment and configuration |
+# | 1a | Optional dataset acquisition |
+# | 2 | Understand and load the data contract |
+# | 3 | Inspect examples and distributions |
+# | 4 | Build and test the validation split |
+# | 5 | Measure imbalance and choose a response |
+# | 6 | Build features or one correct batch |
+# | 7 | Connect outputs, loss and official metric |
+# | 8 | Train and preserve a recoverable candidate |
+# | 9 | Interpret validation and compare experiments |
+# | 10 | Reload and infer every test item |
+# | 11 | Deliver and verify the submission |
 
 # %% [markdown]
-# ## 1. Bootstrap and configuration
+# ## 1. Environment and configuration
 #
-# Run this supplied setup cell; edit only configuration values. Later algorithm cells contain
-# TODO blocks. No weights are fetched. The next optional cell can acquire practice data;
-# otherwise stage local data before repeated reads.
-# Each candidate gets a new output directory.
-#
-#
-#
+# Run the supplied imports and runtime helpers in order. Edit paths, time budget and model policy
+# in the configuration cells. Inspect the actual device; CPU checks cannot establish GPU
+# throughput. Supplied storage/safety definitions are folded where the viewer supports it: run
+# them, but reconstruct the short algorithmic functions during closed-book practice.
 
-# %% [exercise]
+# %% [provided] [stage-1]
 import json
 import pickle
 import random
@@ -67,59 +88,17 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
+from numpy.typing import ArrayLike
+
+# ruff: noqa: E402
+
+# %% [markdown]
+# ### Supplied helper — `CompetitionConfig`
+#
+# Explicit notebook state; no installed project is required.
 
 
-def _json_default(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if is_dataclass(value):
-        return asdict(value)
-    if hasattr(value, "tolist"):
-        return value.tolist()
-    raise TypeError(f"Cannot serialize {type(value).__name__} as JSON")
-
-
-def _write(value: Any, path: Path | str, kind: str) -> Path:
-    destination = Path(path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
-    try:
-        if kind == "json":
-            temporary.write_text(
-                json.dumps(
-                    value, default=_json_default, indent=2, ensure_ascii=False, allow_nan=False
-                ),
-                encoding="utf-8",
-            )
-        elif kind == "pickle":
-            with temporary.open("wb") as handle:
-                pickle.dump(value, handle, protocol=pickle.HIGHEST_PROTOCOL)
-        else:
-            import torch
-
-            torch.save(value, temporary)
-        temporary.replace(destination)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return destination
-
-
-def save_json(value: Any, path: Path | str) -> Path:
-    """Atomically save UTF-8 metadata, including paths, dataclasses, and NumPy values."""
-    return _write(value, path, "json")
-
-
-def save_pickle(value: Any, path: Path | str) -> Path:
-    """Atomically save a fitted local pipeline with preprocessing and original label values."""
-    return _write(value, path, "pickle")
-
-
-def load_pickle(path: Path | str) -> Any:
-    """Reload a trusted, locally produced pickle; never load untrusted downloaded pickle files."""
-    with Path(path).open("rb") as handle:
-        return pickle.load(handle)
-
-
+# %% [provided] [stage-1]
 @dataclass
 class CompetitionConfig:
     """Explicit notebook state; no installed project is required."""
@@ -149,6 +128,13 @@ class CompetitionConfig:
         return {**asdict(self), "data_dir": str(self.data_dir), "output_dir": str(self.output_dir)}
 
 
+# %% [markdown]
+# ### Supplied helper — `TimeBudget`
+#
+# Leave delivery time available; a running batch/fit cannot be interrupted safely.
+
+
+# %% [provided] [stage-1]
 class TimeBudget:
     """Leave delivery time available; a running batch/fit cannot be interrupted safely."""
 
@@ -166,6 +152,13 @@ class TimeBudget:
             raise TimeoutError(f"Delivery reserve reached before {stage}")
 
 
+# %% [markdown]
+# ### Supplied helper — `runtime_paths`
+#
+# Media stays on local disk; optional durable storage is an explicit destination.
+
+
+# %% [provided] [stage-1]
 def runtime_paths(
     *, runtime_dir: Path | None = None, persistent_dir: Path | None = None
 ) -> SimpleNamespace:
@@ -185,6 +178,13 @@ def runtime_paths(
     )
 
 
+# %% [markdown]
+# ### Supplied helper — `mount_google_drive`
+#
+# Call only when an explicitly configured Colab path uses Drive.
+
+
+# %% [provided] [stage-1]
 def mount_google_drive() -> None:
     """Call only when an explicitly configured Colab path uses Drive."""
     from google.colab import drive
@@ -192,6 +192,13 @@ def mount_google_drive() -> None:
     drive.mount("/content/drive")
 
 
+# %% [markdown]
+# ### Supplied helper — `stage_data`
+#
+# Copy a folder or extract a ZIP once, then train from the local destination.
+
+
+# %% [provided] [stage-1]
 def stage_data(source: Path | str, destination: Path | str) -> Path:
     """Copy a folder or extract a ZIP once, then train from the local destination."""
     source, destination = Path(source).resolve(), Path(destination).resolve()
@@ -211,32 +218,13 @@ def stage_data(source: Path | str, destination: Path | str) -> Path:
     return destination
 
 
-def sync_artifacts(source: Path | str, destination: Path | str | None) -> list[Path]:
-    """Copy the entire candidate, including encoders, preserving separate run folders."""
-    if destination is None:
-        return []
-    source, destination = Path(source).resolve(), Path(destination).resolve()
-    if (
-        destination == source
-        or destination.is_relative_to(source)
-        or source.is_relative_to(destination)
-    ):
-        raise ValueError("Output and backup folders must be separate")
-    copied = []
-    for path in source.rglob("*"):
-        if path.is_file() and not path.name.endswith(".tmp"):
-            target = destination / path.relative_to(source)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
-            try:
-                shutil.copy2(path, temporary)
-                temporary.replace(target)
-            finally:
-                temporary.unlink(missing_ok=True)
-            copied.append(target)
-    return copied
+# %% [markdown]
+# ### Supplied helper — `gpu_report`
+#
+# Inspect the actual runtime before choosing image size, batch size or precision.
 
 
+# %% [provided] [stage-1]
 def gpu_report() -> dict:
     """Inspect the actual runtime before choosing image size, batch size or precision."""
     if not torch.cuda.is_available():
@@ -250,6 +238,15 @@ def gpu_report() -> dict:
     }
 
 
+# %% [markdown]
+# ### Configure this run
+#
+# Edit these values before proceeding. DATA_DIR points at your staged pack; choose a separate
+# empty folder for an online download. Keep model permission explicit, start with a small row/time
+# budget, and let the actual device report guide neural batch size. Each run writes to a new
+# candidate directory.
+
+# %% [configuration] [stage-1]
 FAMILY, VARIANT = "02_prices", "baseline"
 DATA_ARCHIVE, PERSISTENT_DIR = None, None
 if "google.colab" in sys.modules and any(
@@ -267,20 +264,25 @@ if DATA_ARCHIVE is not None:
 RUN_ID = f"{FAMILY}-{VARIANT}-{uuid4().hex[:8]}"
 OUTPUT = paths.output_dir / "learning" / RUN_ID
 DURABLE_OUTPUT = paths.persistent_dir / RUN_ID if paths.persistent_dir is not None else None
-PRETRAINED_ALLOWED, WEIGHT_PATH = False, None
-SEED, MAX_ROWS, IMAGE_SIZE, BATCH_SIZE, EPOCHS = 42, 6000, 128, 16, 3
+PRETRAINED_ALLOWED = False
+SEED, MAX_ROWS = 42, 6000
 TIME_BUDGET_MINUTES, DELIVERY_RESERVE_MINUTES = 60, 10
 GROUP_COLUMN, TIME_COLUMN = None, None
 USE_IMBALANCE_WEIGHTS = False
-USE_HISTORY_FEATURES = False
-MODEL_NAME = "resnet18"
-IMAGE_SUFFIX = ".png"
-TEXT_MODEL_DIR, IMAGE_MODEL_CHECKPOINT, EMBEDDING_ARCHIVE = None, None, None
+MODEL_NAME = "ridge_log_price"
+
+# %% [markdown]
+# ### Configure this run
+#
+# Edit these values before proceeding. DATA_DIR points at your staged pack; choose a separate
+# empty folder for an online download. Keep model permission explicit, start with a small row/time
+# budget, and let the actual device report guide neural batch size. Each run writes to a new
+# candidate directory.
+
+# %% [configuration] [stage-1]
 ASSET_PROVENANCE = (
     ""  # exact asset/version/license; required when enabling local pretrained features
 )
-EMBEDDING_PATH, EMBEDDING_DIM, MAX_LENGTH = None, 64, 128
-THRESHOLD_GRID = (0.3, 0.4, 0.5, 0.6, 0.7)
 competition = CompetitionConfig(
     data_dir=DATA_DIR,
     output_dir=OUTPUT,
@@ -295,11 +297,12 @@ print(gpu_report())
 print("Local data:", DATA_DIR, "New candidate:", OUTPUT)
 
 # %% [markdown]
-# ## 1a. Download the practice dataset (optional, before the timed exercise)
+# ## 1a. Optional dataset acquisition
 #
 # The cell is skipped by default. For online preparation, first accept this competition's
 # rules on its Kaggle page and configure credentials using the
-# [official authentication guide](https://github.com/Kaggle/kaggle-cli/blob/main/docs/README.md#authentication).
+# [official authentication
+# guide](https://github.com/Kaggle/kaggle-cli/blob/main/docs/README.md#authentication).
 # Set DOWNLOAD_DATA=True below. Local uv sync includes the official Kaggle client. In a copied
 # notebook/Colab runtime without it, install only `kaggle>=2.2,<3` before running this cell;
 # do not install this project or replace Colab's torch/NumPy/CUDA stack.
@@ -315,9 +318,71 @@ print("Local data:", DATA_DIR, "New candidate:", OUTPUT)
 # checks the expected layout. On Kaggle itself, attach competition data in the notebook UI,
 # point DATA_DIR at its mounted folder, and leave this switch off. For restricted-room drills,
 # prepare data beforehand and keep this cell disabled. The training timer restarts afterward.
-#
 
-# %% [exercise]
+# %% [markdown]
+# ### Supplied helper — `_json_default`
+#
+# Run this supplied definition before its callers. Its inputs and invariants are explained in this
+# section.
+
+
+# %% [provided] [stage-1a]
+def _json_default(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if is_dataclass(value):
+        return asdict(value)
+    if hasattr(value, "tolist"):
+        return value.tolist()
+    raise TypeError(f"Cannot serialize {type(value).__name__} as JSON")
+
+
+# %% [markdown]
+# ### Supplied helper — `_write`
+#
+# Run this supplied definition before its callers. Its inputs and invariants are explained in this
+# section.
+
+
+# %% [provided] [stage-1a]
+def _write(value: Any, path: Path | str, kind: str) -> Path:
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
+    try:
+        if kind == "json":
+            temporary.write_text(
+                json.dumps(
+                    value, default=_json_default, indent=2, ensure_ascii=False, allow_nan=False
+                ),
+                encoding="utf-8",
+            )
+        elif kind == "pickle":
+            with temporary.open("wb") as handle:
+                pickle.dump(value, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        else:
+            import torch
+
+            torch.save(value, temporary)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
+
+
+# %% [markdown]
+# ### Supplied helper — `save_json`
+#
+# Atomically save UTF-8 metadata, including paths, dataclasses, and NumPy values.
+
+
+# %% [provided] [stage-1a]
+def save_json(value: Any, path: Path | str) -> Path:
+    """Atomically save UTF-8 metadata, including paths, dataclasses, and NumPy values."""
+    return _write(value, path, "json")
+
+
+# %% [configuration] [stage-1a]
 import os
 import subprocess
 from getpass import getpass
@@ -330,7 +395,13 @@ DOWNLOAD_CACHE = DATA_DIR.parent / "_downloads" / KAGGLE_COMPETITION
 DOWNLOAD_TIMEOUT_SECONDS = 7200
 PROMPT_FOR_KAGGLE_TOKEN = "google.colab" in sys.modules
 
+# %% [markdown]
+# ### Supplied helper — `extract_dataset_zip`
+#
+# Extract data without allowing absolute paths, traversal or silent overwrites.
 
+
+# %% [provided] [stage-1a]
 def extract_dataset_zip(source: Path, destination: Path) -> None:
     """Extract data without allowing absolute paths, traversal or silent overwrites."""
     destination = Path(destination).resolve()
@@ -352,6 +423,13 @@ def extract_dataset_zip(source: Path, destination: Path) -> None:
                 shutil.copyfileobj(incoming, outgoing)
 
 
+# %% [markdown]
+# ### Supplied helper — `download_practice_data`
+#
+# Use the official CLI, then publish the complete extracted folder by renaming it.
+
+
+# %% [provided] [stage-1a]
 def download_practice_data(
     competition: str,
     destination: Path,
@@ -465,6 +543,7 @@ def download_practice_data(
     return destination
 
 
+# %% [provided] [stage-1a]
 if DOWNLOAD_DATA:
     if DATA_ARCHIVE is not None:
         raise ValueError("Choose either DATA_ARCHIVE staging or DOWNLOAD_DATA, then rerun setup")
@@ -480,19 +559,19 @@ source_marker = DATA_DIR / ".kaggle-source.json"
 if source_marker.is_file():
     save_json(json.loads(source_marker.read_text(encoding="utf-8")), OUTPUT / "data_source.json")
 print("Download enabled:", DOWNLOAD_DATA, "Dataset folder:", DATA_DIR)
-# Dataset acquisition is preparation time, not part of the measured training/delivery budget.
 budget = TimeBudget(TIME_BUDGET_MINUTES, reserve_minutes=DELIVERY_RESERVE_MINUTES)
 
 # %% [markdown]
-# ## 2. Load data and enforce the contract
+# ## 2. Understand and load the data contract
 #
-# Check schema and identity before fitting. A row is not always a prediction unit: detection has
-# several annotation rows per image, and matching has several records per product.
+# One row represents one house. Id is a key, SalePrice is a positive amount, and the submission
+# must contain prices in the original currency scale, not log prices.
 #
-#
-#
+# Read the first rows, column names and actual shapes below. Expected: unique nonempty prediction
+# IDs; matching test/sample ID sets; a target schema that agrees with the official output. Dataset
+# size depends on your local files and MAX_ROWS.
 
-# %% [exercise]
+# %% [worked] [stage-2]
 ID_COLUMN = "Id"
 TARGET_COLUMNS = ["SalePrice"]
 train = pd.read_csv(DATA_DIR / "train.csv", converters={ID_COLUMN: str})
@@ -514,17 +593,34 @@ assert sample.columns.tolist() == [ID_COLUMN, *TARGET_COLUMNS]
 print(train.head(3).to_string(index=False))
 print("Shapes:", train.shape, test.shape, sample.shape)
 
-# %% [markdown]
-# ## 3. Inspect and visualize the data
-#
-# Write down three observations from these plots before revealing any solution: missingness,
-# examples that look wrong, and a possible leakage unit. Never select experiments using hidden
-# test labels.
-#
-#
-#
+# %% [check] [stage-2]
+assert len(train) > 0 and len(test) == len(sample)
+assert train[ID_COLUMN].is_unique and sample[ID_COLUMN].is_unique
+print("Data-contract checks passed: prediction units and sample coverage.")
 
-# %% [exercise]
+# %% [markdown]
+# ### Stop and explain
+#
+# What is the prediction unit, and which columns may enter the model?
+#
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
+#
+# One row represents one house. Id is a key, SalePrice is a positive amount, and the submission
+# must contain prices in the original currency scale, not log prices.
+#
+# </details>
+
+# %% [markdown]
+# ## 3. Inspect examples and distributions
+#
+# Inspect the plotted examples before selecting a model. Write observations before reading the
+# next section.
+#
+# How skewed is SalePrice before and after taking logs? Which columns mix numbers and categories?
+# Could repeated properties, neighborhoods or sale dates make a random split optimistic?
+
+# %% [worked] [stage-3]
 print(train.dtypes.to_string())
 print(train.describe(include="all").to_string())
 fig, axes = plt.subplots(1, 3, figsize=(14, 3))
@@ -539,19 +635,36 @@ plt.show()
 plt.close(fig)
 
 # %% [markdown]
-# ## 4. Freeze a leakage-aware split
+# ### Stop and explain
 #
-# Keep these exact folds for baseline/advanced comparisons. Random stratification is only
-# appropriate for independent samples. Set a group or time column when the acquisition process
-# demands it; assert the chosen boundary.
+# Record three observations: one distribution issue, one suspicious example, and one possible
+# leakage source. What experiment does each justify?
 #
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
 #
+# Use the actual plots and rows; there is no fixed answer independent of your pack. Convert each
+# observation into a falsifiable check before spending training time.
 #
+# </details>
 
-# %% [exercise]
+# %% [markdown]
+# ## 4. Build and test the validation split
+#
+# Use a reproducible house-level holdout. If repeated properties or chronological sales are
+# present, use the corresponding groups or time boundary. Keep this outer holdout untouched while
+# selecting model combinations.
+
+# %% [worked] [stage-4]
 from sklearn.model_selection import GroupShuffleSplit, StratifiedGroupKFold, train_test_split
 
+# %% [markdown]
+# ### Supplied helper — `SplitResult`
+#
+# Training/validation tables plus their original positional indexes.
 
+
+# %% [provided] [stage-4]
 @dataclass(slots=True)
 class SplitResult:
     """Training/validation tables plus their original positional indexes."""
@@ -562,6 +675,14 @@ class SplitResult:
     valid_indices: np.ndarray
 
 
+# %% [markdown]
+# ### Supplied helper — `_stratification_key`
+#
+# Run this supplied definition before its callers. Its inputs and invariants are explained in this
+# section.
+
+
+# %% [provided] [stage-4]
 def _stratification_key(frame: pd.DataFrame, targets: Sequence[str]) -> pd.Series:
     if not targets:
         raise ValueError("At least one target is required for stratification")
@@ -570,6 +691,13 @@ def _stratification_key(frame: pd.DataFrame, targets: Sequence[str]) -> pd.Serie
     return frame[list(targets)].astype(str).agg("|".join, axis=1)
 
 
+# %% [markdown]
+# ### Supplied helper — `make_split`
+#
+# Create a deterministic holdout with leakage-aware group and time options.
+
+
+# %% [provided] [stage-4]
 def make_split(
     frame: pd.DataFrame,
     *,
@@ -640,17 +768,75 @@ def make_split(
     )
 
 
-# >>> exercise: choose the legal split and retain exactly these folds
-split = make_split(
-    train,
-    target_columns=None,
-    group_column=GROUP_COLUMN,
-    time_column=TIME_COLUMN,
-    valid_size=0.2,
-    seed=SEED,
+# %% [markdown]
+# ### Exercise 1 — `create_holdout`
+#
+# Input: a row-per-prediction table and its actual leakage columns. Return: the split record and
+# independent training/validation copies. The union must retain all rows; identities must not
+# cross folds.
+#
+# <details>
+# <summary>Hint 1 — choose the operation</summary>
+#
+# Use a reproducible house-level holdout. If repeated properties or chronological sales are
+# present, use the corresponding groups or time boundary. Keep this outer holdout untouched while
+# selecting model combinations.
+#
+# </details>
+#
+# <details>
+# <summary>Hint 2 — implementation direction</summary>
+#
+# Use make_split with valid_size=0.2; return copies of its train and valid tables.
+#
+# </details>
+
+
+# %% [exercise] [stage-4]
+def create_holdout(
+    frame: pd.DataFrame,
+    target_columns: Any = None,
+    group_column: str | None = None,
+    time_column: str | None = None,
+    seed: int = 42,
+) -> Any:
+    """Input: a row-per-prediction table and its actual leakage columns. Return: the split
+    record and independent training/validation copies. The union must retain all rows;
+    identities must not cross folds.
+    """
+    # >>> exercise: implement create_holdout using the stated contract
+    split = make_split(
+        frame,
+        target_columns=target_columns,
+        group_column=group_column,
+        time_column=time_column,
+        valid_size=0.2,
+        seed=seed,
+    )
+    tr, va = split.train.copy(), split.valid.copy()
+    # <<< exercise
+    return split, tr, va
+
+
+# %% [markdown]
+# **Check before continuing.** Predict the result, run the small test below, and use its assertion
+# message to locate an error. Expected: all assertions pass and the printed success message
+# appears. These checks do not fit the real candidate.
+
+# %% [check] [stage-4]
+toy_frame = pd.DataFrame({"id": range(12), "group": np.repeat(range(6), 2)})
+toy_split, toy_train, toy_valid = create_holdout(toy_frame, group_column="group", seed=7)
+assert len(toy_train) + len(toy_valid) == 12, "The split must retain every row"
+assert not set(toy_train["group"]) & set(toy_valid["group"]), "Repeated identities leaked"
+assert not set(toy_split.train_indices) & set(toy_split.valid_indices)
+toy_again = create_holdout(toy_frame, group_column="group", seed=7)[0]
+np.testing.assert_array_equal(toy_split.valid_indices, toy_again.valid_indices)
+print("Split checks passed: complete, group-disjoint and reproducible.")
+
+# %% [worked] [stage-4]
+split, tr, va = create_holdout(
+    train, target_columns=None, group_column=GROUP_COLUMN, time_column=TIME_COLUMN, seed=SEED
 )
-tr, va = split.train.copy(), split.valid.copy()
-# <<< exercise
 assert not set(tr[ID_COLUMN]) & set(va[ID_COLUMN])
 if GROUP_COLUMN:
     assert not set(tr[GROUP_COLUMN]) & set(va[GROUP_COLUMN])
@@ -658,24 +844,93 @@ if TIME_COLUMN:
     assert pd.to_datetime(tr[TIME_COLUMN]).max() < pd.to_datetime(va[TIME_COLUMN]).min()
 print("Frozen fold sizes:", len(tr), len(va))
 
-# %% [markdown]
-# ## 5. Audit imbalance and choose a response
-#
-# Measure prevalence on the training fold. Choose the response according to the official score:
-# class weights, positive weights, coverage sampling or a log target are hypotheses. Compare
-# with the unweighted candidate on the same split. Never rebalance validation.
-#
-# Long-tailed regression is not a class-balancing problem. The log transform aligns the
-# objective with the task's score. Investigate tail residuals instead of assigning arbitrary
-# class weights.
-#
+# %% [check] [stage-4]
+assert len(tr) > 0 and len(va) > 0
+assert not set(tr[ID_COLUMN]) & set(va[ID_COLUMN])
+print("Actual-fold checks passed: nonempty disjoint prediction IDs.")
 
-# %% [exercise]
+# %% [markdown]
+# ### Stop and explain
+#
+# Would a random row split measure the generalization you need here? Identify the boundary that
+# would leak information.
+#
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
+#
+# Use a reproducible house-level holdout. If repeated properties or chronological sales are
+# present, use the corresponding groups or time boundary. Keep this outer holdout untouched while
+# selecting model combinations.
+#
+# </details>
+
+# %% [markdown]
+# ## 5. Measure imbalance and choose a response
+#
+# This is a long-tailed regression target, not class imbalance. A log transform changes the
+# optimization problem to emphasize relative price errors. Do not bin/rebalance validation houses
+# to manufacture an easier score.
+#
+# $z=\log(y)$; $\mathrm{score}=\sqrt{\mathrm{mean}[(\log y-\log\hat y)^2]}$. Convert predictions
+# back with exp before delivery.
+
+# %% [worked] [stage-5]
 quantiles = tr["SalePrice"].quantile([0, 0.1, 0.5, 0.9, 1])
 print("Training target quantiles:", quantiles.to_dict())
-# >>> exercise: transform the positive training target to match the official log-space loss
-y_train = np.log(tr["SalePrice"].to_numpy())
-# <<< exercise
+
+# %% [markdown]
+# ### Exercise 2 — `log_training_target`
+#
+# Input: finite positive original prices [N]. Return: natural-log training targets [N]. Reject
+# nonpositive inputs; do not use log1p.
+#
+# <details>
+# <summary>Hint 1 — choose the operation</summary>
+#
+# This is a long-tailed regression target, not class imbalance. A log transform changes the
+# optimization problem to emphasize relative price errors. Do not bin/rebalance validation houses
+# to manufacture an easier score.
+#
+# </details>
+#
+# <details>
+# <summary>Hint 2 — implementation direction</summary>
+#
+# Validate prices before calling np.log. Exponentiation is reserved for final prediction decoding.
+#
+# </details>
+
+
+# %% [exercise] [stage-5]
+def log_training_target(prices: np.ndarray) -> Any:
+    """Input: finite positive original prices [N]. Return: natural-log training targets [N].
+    Reject nonpositive inputs; do not use log1p.
+    """
+    # >>> exercise: implement log_training_target using the stated contract
+    if not np.isfinite(prices).all() or (prices <= 0).any():
+        raise ValueError("Log-price targets must be finite and positive")
+    y_train = np.log(prices)
+    # <<< exercise
+    return y_train
+
+
+# %% [markdown]
+# **Check before continuing.** Predict the result, run the small test below, and use its assertion
+# message to locate an error. Expected: all assertions pass and the printed success message
+# appears. These checks do not fit the real candidate.
+
+# %% [check] [stage-5]
+np.testing.assert_allclose(log_training_target(np.array([1.0, np.exp(2)])), [0, 2])
+try:
+    log_training_target(np.array([0.0, 1.0]))
+except ValueError:
+    pass
+else:
+    raise AssertionError("Log-price targets must be strictly positive")
+print("Target checks passed: natural logs and rejection of nonpositive prices.")
+
+# %% [worked] [stage-5]
+y_train = log_training_target(tr["SalePrice"].to_numpy())
 print("Response: log target; do not oversample or trim validation tails")
 np.log(tr["SalePrice"]).hist(bins=25)
 plt.title("Training log-price distribution")
@@ -685,15 +940,28 @@ plt.show()
 plt.close()
 
 # %% [markdown]
-# ## 6. Build features or datasets
+# ### Stop and explain
 #
-# Inspect one transformed example or batch. Explain its shape, range, label encoding and
-# train/validation/test consistency. Fitted preprocessing sees the training fold only.
+# Does changing training weights also change the official score or validation distribution? What
+# would justify enabling the response?
 #
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
 #
+# This is a long-tailed regression target, not class imbalance. A log transform changes the
+# optimization problem to emphasize relative price errors. Do not bin/rebalance validation houses
+# to manufacture an easier score.
 #
+# </details>
 
-# %% [exercise]
+# %% [markdown]
+# ## 6. Build features or one correct batch
+#
+# Fit numeric imputation/scaling and categorical imputation/one-hot encoding inside a Ridge
+# pipeline. Select columns from the training fold. Validation houses may have missing values or
+# unseen category strings.
+
+# %% [worked] [stage-6]
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import make_pipeline
@@ -707,89 +975,116 @@ feature_columns = [
 X_train, X_valid, X_test = tr[feature_columns], va[feature_columns], test[feature_columns]
 numeric = X_train.select_dtypes("number").columns.tolist()
 categorical = [column for column in feature_columns if column not in numeric]
-# >>> exercise: keep fitted imputation and encoding inside the model pipeline
-preprocessing = ColumnTransformer(
-    [
-        (
-            "numeric",
-            make_pipeline(
-                SimpleImputer(strategy="median", keep_empty_features=True), StandardScaler()
+
+# %% [markdown]
+# ### Exercise 3 — `make_preprocessing`
+#
+# Input: numeric/categorical training column names. Return: an unfitted ColumnTransformer. Median
+# imputation/scaling belongs to numeric features; categorical imputation and unknown-safe one-hot
+# encoding belong to categories. Do not fit here.
+#
+# <details>
+# <summary>Hint 1 — choose the operation</summary>
+#
+# Fit numeric imputation/scaling and categorical imputation/one-hot encoding inside a Ridge
+# pipeline. Select columns from the training fold. Validation houses may have missing values or
+# unseen category strings.
+#
+# </details>
+#
+# <details>
+# <summary>Hint 2 — implementation direction</summary>
+#
+# Use separate numeric/category pipelines inside ColumnTransformer; OneHotEncoder must ignore
+# unknown categories.
+#
+# </details>
+
+
+# %% [exercise] [stage-6]
+def make_preprocessing(numeric: Sequence[str], categorical: Sequence[str]) -> Any:
+    """Input: numeric/categorical training column names. Return: an unfitted ColumnTransformer.
+    Median imputation/scaling belongs to numeric features; categorical imputation and
+    unknown-safe one-hot encoding belong to categories. Do not fit here.
+    """
+    # >>> exercise: implement make_preprocessing using the stated contract
+    preprocessing = ColumnTransformer(
+        [
+            (
+                "numeric",
+                make_pipeline(
+                    SimpleImputer(strategy="median", keep_empty_features=True), StandardScaler()
+                ),
+                numeric,
             ),
-            numeric,
-        ),
-        (
-            "category",
-            make_pipeline(
-                SimpleImputer(strategy="constant", fill_value="missing", keep_empty_features=True),
-                OneHotEncoder(handle_unknown="ignore"),
+            (
+                "category",
+                make_pipeline(
+                    SimpleImputer(
+                        strategy="constant", fill_value="missing", keep_empty_features=True
+                    ),
+                    OneHotEncoder(handle_unknown="ignore"),
+                ),
+                categorical,
             ),
-            categorical,
-        ),
-    ]
-)
-# <<< exercise
+        ]
+    )
+    # <<< exercise
+    return preprocessing
+
+
+# %% [markdown]
+# **Check before continuing.** Predict the result, run the small test below, and use its assertion
+# message to locate an error. Expected: all assertions pass and the printed success message
+# appears. These checks do not fit the real candidate.
+
+# %% [check] [stage-6]
+toy_numeric, toy_category = ["age"], ["town"]
+toy_preprocessing = make_preprocessing(toy_numeric, toy_category)
+assert not hasattr(toy_preprocessing, "transformers_"), "Construction must not fit on real data"
+toy_training = pd.DataFrame({"age": [20.0, 40.0, np.nan], "town": ["a", "b", "a"]})
+toy_validation = pd.DataFrame({"age": [np.nan], "town": ["never_seen"]})
+toy_preprocessing.fit(toy_training)
+toy_encoded = toy_preprocessing.transform(toy_validation)
+assert toy_encoded.shape[0] == 1
+toy_dense = toy_encoded.toarray() if hasattr(toy_encoded, "toarray") else np.asarray(toy_encoded)
+assert np.isfinite(toy_dense).all(), "Missing values/unseen categories must not break inference"
+print("Preprocessing checks passed: unfitted construction, missing values and new categories.")
+
+# %% [worked] [stage-6]
+preprocessing = make_preprocessing(numeric, categorical)
 print("Numeric / categorical:", len(numeric), len(categorical))
 print("Raw feature preview:", X_train.head(2).to_string(index=False))
 
 # %% [markdown]
-# ## 7. Define the model and loss
+# ### Stop and explain
 #
-# State why the output dimension and loss fit this prediction contract. First verify the
-# simplest model. Pretrained initialization is disabled unless the exact local asset is
-# permitted.
+# State the feature/batch shapes and the exact point at which preprocessing is fitted. What
+# happens to a previously unseen validation input?
 #
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
 #
+# Fit numeric imputation/scaling and categorical imputation/one-hot encoding inside a Ridge
+# pipeline. Select columns from the training fold. Validation houses may have missing values or
+# unseen category strings.
 #
-
-# %% [exercise]
-from sklearn.linear_model import Ridge
-
-# >>> exercise: regress the transformed target with regularization
-model = make_pipeline(preprocessing, Ridge(alpha=10, solver="lsqr"))
-# <<< exercise
-MODEL_DESCRIPTION = "one-hot Ridge on natural log prices"
-
-
-def predict_scores(candidate, frame):
-    return np.exp(candidate.predict(frame))
-
+# </details>
 
 # %% [markdown]
-# ## 8. Train and preserve the candidate
+# ## 7. Connect outputs, loss and official metric
 #
-# First fit a tiny subset as a debugging drill; rebuild before the real-fold experiment. Main
-# torch lessons define their small training loop directly below, including precision, time
-# reserves and atomic best checkpoints. For sklearn fit the full preprocessing pipeline together.
-#
-#
-#
-
-# %% [exercise]
-started = perf_counter()
-budget.checkpoint("fit")
-# >>> exercise: fit once on the training fold and save the entire fitted pipeline
-model.fit(X_train, y_train)
-checkpoint_path = save_pickle(model, OUTPUT / "pipeline.pkl")
-# <<< exercise
-fit_seconds = perf_counter() - started
-validation_predictions = predict_scores(model, X_valid)
-selected_threshold = 0.5
-print("Fit seconds:", fit_seconds)
+# Ridge regresses log prices with L2 regularization. Its raw output is unconstrained log price;
+# exponentiation yields a positive submitted amount. Choose alpha using validation evidence rather
+# than a large initial search.
 
 # %% [markdown]
-# ## 9. Validate, inspect errors and compare cost
+# ### Worked component — `log_price_rmse`
 #
-# Use all validation predictions for the exact score. Inspect individual mistakes and
-# minority/group performance; the diagnostic metric does not replace the official metric. Keep a
-# score/runtime ledger before choosing more complexity.
-#
-#
-#
-
-# %% [exercise]
-from numpy.typing import ArrayLike
+# House Prices RMSE of natural logarithms; unlike RMSLE, there is no added one.
 
 
+# %% [worked] [stage-7]
 def log_price_rmse(truth: ArrayLike, prediction: ArrayLike) -> float:
     """House Prices RMSE of natural logarithms; unlike RMSLE, there is no added one."""
     y, p = np.asarray(truth, dtype=float), np.asarray(prediction, dtype=float)
@@ -800,9 +1095,297 @@ def log_price_rmse(truth: ArrayLike, prediction: ArrayLike) -> float:
     return float(np.sqrt(np.mean((np.log(y) - np.log(p)) ** 2)))
 
 
-# >>> exercise: match RMSE(log true, log predicted) exactly
-validation_score = log_price_rmse(va["SalePrice"], validation_predictions)
-# <<< exercise
+# %% [markdown]
+# ### Supplied helper — `save_pickle`
+#
+# Atomically save a fitted local pipeline with preprocessing and original label values.
+
+
+# %% [provided] [stage-7]
+def save_pickle(value: Any, path: Path | str) -> Path:
+    """Atomically save a fitted local pipeline with preprocessing and original label values."""
+    return _write(value, path, "pickle")
+
+
+# %% [markdown]
+# ### Supplied helper — `load_pickle`
+#
+# Reload a trusted, locally produced pickle; never load untrusted downloaded pickle files.
+
+
+# %% [provided] [stage-7]
+def load_pickle(path: Path | str) -> Any:
+    """Reload a trusted, locally produced pickle; never load untrusted downloaded pickle files."""
+    with Path(path).open("rb") as handle:
+        return pickle.load(handle)
+
+
+# %% [markdown]
+# ### Supplied helper — `sync_artifacts`
+#
+# Copy the entire candidate, including encoders, preserving separate run folders.
+
+
+# %% [provided] [stage-7]
+def sync_artifacts(source: Path | str, destination: Path | str | None) -> list[Path]:
+    """Copy the entire candidate, including encoders, preserving separate run folders."""
+    if destination is None:
+        return []
+    source, destination = Path(source).resolve(), Path(destination).resolve()
+    if (
+        destination == source
+        or destination.is_relative_to(source)
+        or source.is_relative_to(destination)
+    ):
+        raise ValueError("Output and backup folders must be separate")
+    copied = []
+    for path in source.rglob("*"):
+        if path.is_file() and not path.name.endswith(".tmp"):
+            target = destination / path.relative_to(source)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+            try:
+                shutil.copy2(path, temporary)
+                temporary.replace(target)
+            finally:
+                temporary.unlink(missing_ok=True)
+            copied.append(target)
+    return copied
+
+
+# %% [worked] [stage-7]
+from sklearn.linear_model import Ridge
+
+# %% [markdown]
+# ### Exercise 4 — `build_estimator`
+#
+# Input: unfitted feature/preprocessing component and model policy. Return an unfitted sklearn
+# pipeline. Keep feature fitting and estimator fitting together; the pipeline is the persisted
+# inference candidate.
+#
+# <details>
+# <summary>Hint 1 — choose the operation</summary>
+#
+# Ridge regresses log prices with L2 regularization. Its raw output is unconstrained log price;
+# exponentiation yields a positive submitted amount. Choose alpha using validation evidence rather
+# than a large initial search.
+#
+# </details>
+#
+# <details>
+# <summary>Hint 2 — implementation direction</summary>
+#
+# Compose the feature transformer with the stated regularized estimator. Multilabel targets
+# require independent binary classifiers.
+#
+# </details>
+
+
+# %% [exercise] [stage-7]
+def build_estimator(preprocessing: Any) -> Any:
+    """Input: unfitted feature/preprocessing component and model policy. Return an unfitted
+    sklearn pipeline. Keep feature fitting and estimator fitting together; the pipeline is
+    the persisted inference candidate.
+    """
+    # >>> exercise: implement build_estimator using the stated contract
+    model = make_pipeline(preprocessing, Ridge(alpha=10, solver="lsqr"))
+    # <<< exercise
+    return model
+
+
+# %% [markdown]
+# **Check before continuing.** Predict the result, run the small test below, and use its assertion
+# message to locate an error. Expected: all assertions pass and the printed success message
+# appears. These checks do not fit the real candidate.
+
+# %% [check] [stage-7]
+toy_model = build_estimator(make_preprocessing(["age"], ["town"]))
+assert not hasattr(toy_model.steps[-1][1], "coef_"), "Construction must not fit the regressor"
+toy_training = pd.DataFrame({"age": [20, 25, 30, 40], "town": ["a", "b", "a", "b"]})
+toy_model.fit(toy_training, np.log(np.array([100.0, 200.0, 300.0, 400.0])))
+toy_log_predictions = toy_model.predict(pd.DataFrame({"age": [np.nan], "town": ["new"]}))
+assert toy_log_predictions.shape == (1,) and np.isfinite(toy_log_predictions).all()
+assert (np.exp(toy_log_predictions) > 0).all()
+print("Estimator checks passed: a separate tiny regressor produces decodable log prices.")
+
+# %% [worked] [stage-7]
+model = build_estimator(preprocessing)
+MODEL_DESCRIPTION = "one-hot Ridge on natural log prices"
+
+# %% [markdown]
+# ### Worked component — `predict_scores`
+#
+# Run this supplied definition before its callers. Its inputs and invariants are explained in this
+# section.
+
+
+# %% [worked] [stage-7]
+def predict_scores(candidate, frame):
+    return np.exp(candidate.predict(frame))
+
+
+# %% [markdown]
+# ### Exercise 5 — `score_predictions`
+#
+# Input: aligned positive original prices [N] and positive predicted prices [N]. Return RMSE of
+# their natural logarithms. Do not substitute raw-price RMSE or log1p.
+#
+# <details>
+# <summary>Hint 1 — choose the operation</summary>
+#
+# Use RMSE of natural log prices, not raw-price RMSE and not log1p RMSE. Inspect the largest log
+# residuals and price ranges. A small gain may be split noise or a costly stacking artifact.
+#
+# </details>
+#
+# <details>
+# <summary>Hint 2 — implementation direction</summary>
+#
+# Use the task-specific evaluator without thresholding probability metrics or changing the target
+# scale.
+#
+# </details>
+
+
+# %% [exercise] [stage-7]
+def score_predictions(truth: np.ndarray, predictions: np.ndarray) -> Any:
+    """Input: aligned positive original prices [N] and positive predicted prices [N]. Return
+    RMSE of their natural logarithms. Do not substitute raw-price RMSE or log1p.
+    """
+    # >>> exercise: implement score_predictions using the stated contract
+    validation_score = log_price_rmse(truth, predictions)
+    # <<< exercise
+    return validation_score
+
+
+# %% [markdown]
+# **Check before continuing.** Predict the result, run the small test below, and use its assertion
+# message to locate an error. Expected: all assertions pass and the printed success message
+# appears. These checks do not fit the real candidate.
+
+# %% [check] [stage-7]
+np.testing.assert_allclose(score_predictions(np.array([1.0, np.exp(2)]), np.array([np.e, np.e])), 1)
+assert score_predictions(np.array([1.0, 2.0]), np.array([1.0, 2.0])) == 0
+print("Metric checks passed: natural-log RMSE, not raw-price RMSE.")
+
+# %% [markdown]
+# ### Stop and explain
+#
+# Explain the output shape, loss and prediction decoding without reading the implementation. Which
+# convention would silently produce an invalid score?
+#
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
+#
+# Ridge regresses log prices with L2 regularization. Its raw output is unconstrained log price;
+# exponentiation yields a positive submitted amount. Choose alpha using validation evidence rather
+# than a large initial search. Use RMSE of natural log prices, not raw-price RMSE and not log1p
+# RMSE. Inspect the largest log residuals and price ranges. A small gain may be split noise or a
+# costly stacking artifact.
+#
+# </details>
+
+# %% [markdown]
+# ## 8. Train and preserve a recoverable candidate
+#
+# Fit on training log prices and save the full fitted pipeline or stack. The meta-learner may see
+# only OOF features; the final base learners may then refit on the outer training partition, never
+# the held-out houses.
+
+# %% [worked] [stage-8]
+started = perf_counter()
+budget.checkpoint("fit")
+
+# %% [markdown]
+# ### Exercise 6 — `fit_candidate`
+#
+# Fit only the supplied training data and atomically persist the entire fitted candidate under
+# output_dir. Return its checkpoint path. The caller must not pass validation/test data to this
+# function.
+#
+# <details>
+# <summary>Hint 1 — choose the operation</summary>
+#
+# Fit on training log prices and save the full fitted pipeline or stack. The meta-learner may see
+# only OOF features; the final base learners may then refit on the outer training partition, never
+# the held-out houses.
+#
+# </details>
+#
+# <details>
+# <summary>Hint 2 — implementation direction</summary>
+#
+# Fit the supplied object, then save_pickle the same fitted object. Persist preprocessing with the
+# estimator.
+#
+# </details>
+
+
+# %% [exercise] [stage-8]
+def fit_candidate(candidate: Any, features: Any, targets: Any, output_dir: Path) -> Any:
+    """Fit only the supplied training data and atomically persist the entire fitted candidate
+    under output_dir. Return its checkpoint path. The caller must not pass validation/test
+    data to this function.
+    """
+    # >>> exercise: implement fit_candidate using the stated contract
+    candidate.fit(features, targets)
+    checkpoint_path = save_pickle(candidate, output_dir / "pipeline.pkl")
+    # <<< exercise
+    return checkpoint_path
+
+
+# %% [markdown]
+# **Check before continuing.** Predict the result, run the small test below, and use its assertion
+# message to locate an error. Expected: all assertions pass and the printed success message
+# appears. These checks do not fit the real candidate.
+
+# %% [check] [stage-8]
+from sklearn.dummy import DummyRegressor
+
+toy_features = pd.DataFrame({"x": [0, 1, 2, 3]})
+toy_targets = np.array([0, 1, 0, 1])
+toy_path = fit_candidate(DummyRegressor(), toy_features, toy_targets, OUTPUT / "checks" / "fit")
+toy_restored = load_pickle(toy_path)
+assert np.asarray(toy_restored.predict(toy_features)).shape == toy_targets.shape
+print("Fit/reload checks passed on a separate tiny estimator; the real candidate is untouched.")
+
+# %% [worked] [stage-8]
+checkpoint_path = fit_candidate(model, X_train, y_train, OUTPUT)
+fit_seconds = perf_counter() - started
+validation_predictions = predict_scores(model, X_valid)
+selected_threshold = 0.5
+print("Fit seconds:", fit_seconds)
+
+# %% [check] [stage-8]
+assert checkpoint_path.is_file(), "No saved candidate is available for inference"
+assert np.isfinite(fit_seconds) and fit_seconds >= 0
+print("Candidate checks passed: persisted artifact and measured fit time.")
+
+# %% [markdown]
+# ### Stop and explain
+#
+# What evidence proves the saved artifact can reproduce inference? Which training state is not
+# promised by this reload?
+#
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
+#
+# Keep architecture/preprocessing, label order and best weights together, then compare reloaded
+# validation predictions. This lesson preserves inference recovery, not an exact continuation of
+# optimizer/scaler/random state.
+#
+# </details>
+
+# %% [markdown]
+# ## 9. Interpret validation and compare experiments
+#
+# Use RMSE of natural log prices, not raw-price RMSE and not log1p RMSE. Inspect the largest log
+# residuals and price ranges. A small gain may be split noise or a costly stacking artifact.
+
+# %% [worked] [stage-9]
+from numpy.typing import ArrayLike
+
+validation_score = score_predictions(va["SalePrice"].to_numpy(), validation_predictions)
 errors = va[[ID_COLUMN, "SalePrice"]].copy()
 errors["prediction"] = validation_predictions
 errors["log_residual"] = np.log(errors["prediction"]) - np.log(errors["SalePrice"])
@@ -821,41 +1404,103 @@ plt.savefig(OUTPUT / "validation.png")
 plt.show()
 plt.close()
 
-# %% [markdown]
-# ## 10. Reload and run complete inference
-#
-# Rebuild or reload the saved candidate before test inference. Preserve ID order through the
-# loader, then align to the sample by ID. Check that reloaded validation predictions agree. This
-# is inference recovery, not exact training continuation.
-#
-#
-#
+# %% [check] [stage-9]
+assert np.isfinite(validation_score), "Selection requires a finite official score"
+print("Validation check passed. Compare this score and runtime with the baseline ledger.")
 
-# %% [exercise]
+# %% [markdown]
+# ### Stop and explain
+#
+# What is the next single experiment, and what result would make you reject it?
+#
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
+#
+# Compare Ridge and the OOF stack on the same outer holdout. Count all inner fits in runtime.
+# Check a second property/time-aware split before accepting a tiny stacking improvement.
+#
+# </details>
+
+# %% [markdown]
+# ## 10. Reload and infer every test item
+#
+# Reload the fitted candidate, reproduce validation predictions, exponentiate log predictions, and
+# ensure every submitted price is finite and positive. Keep the sample's Id order.
+
+# %% [worked] [stage-10]
 started = perf_counter()
+
+# %% [markdown]
+# ### Exercise 7 — Reload and predict
+#
+# Reload the fitted candidate, reproduce validation predictions, exponentiate log predictions, and
+# ensure every submitted price is finite and positive. Keep the sample's Id order.
+#
+# <details>
+# <summary>Hint 1 — choose the operation</summary>
+#
+# Reload the fitted candidate, reproduce validation predictions, exponentiate log predictions, and
+# ensure every submitted price is finite and positive. Keep the sample's Id order.
+#
+# </details>
+#
+# <details>
+# <summary>Hint 2 — implementation direction</summary>
+#
+# prove inference comes from the saved candidate, then predict every test row
+#
+# </details>
+
+# %% [exercise] [stage-10]
 # >>> exercise: prove inference comes from the saved candidate, then predict every test row
 restored = load_pickle(checkpoint_path)
 np.testing.assert_allclose(predict_scores(restored, X_valid), validation_predictions)
 test_predictions = predict_scores(restored, X_test)
 # <<< exercise
+
+# %% [worked] [stage-10]
 assert np.isfinite(test_predictions).all()
 assert (test_predictions > 0).all()
 output_values = {TARGET_COLUMNS[0]: test_predictions}
 save_json({"feature_columns": feature_columns, "model": str(model)}, OUTPUT / "recipe.json")
 inference_seconds = perf_counter() - started
 
+# %% [check] [stage-10]
+assert set(output_values) == set(sample.columns) - {ID_COLUMN}
+assert all(len(values) == len(test) for values in output_values.values())
+print("Inference checks passed: every test item has the required output columns.")
+
 # %% [markdown]
-# ## 11. Validate the submission and persist the recipe
+# ### Stop and explain
 #
-# Validate the on-disk UTF-8 file, expected columns, ID order and task-specific value
-# constraints. Keep source, preprocessing, fold IDs, labels, thresholds, score and runtime with
-# the selected artifact. A checked CSV is not proof of upload acceptance.
+# Can this saved candidate handle every private input without refitting or downloading anything?
+# Which assets must travel with it?
 #
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
 #
+# Reload the fitted candidate, reproduce validation predictions, exponentiate log predictions, and
+# ensure every submitted price is finite and positive. Keep the sample's Id order.
 #
+# </details>
+
+# %% [markdown]
+# ## 11. Deliver and verify the submission
+#
+# One row represents one house. Id is a key, SalePrice is a positive amount, and the submission
+# must contain prices in the original currency scale, not log prices.
+#
+# Write the CSV, read it back, and verify IDs, columns, row count, missing values and allowed
+# prediction values before saving the complete recipe. A local check does not confirm organizer
+# upload acceptance.
+
+# %% [markdown]
+# ### Supplied helper — `SubmissionValidation`
+#
+# Validation errors and non-fatal warnings for a candidate submission.
 
 
-# %% [exercise]
+# %% [provided] [stage-11]
 @dataclass(slots=True)
 class SubmissionValidation:
     """Validation errors and non-fatal warnings for a candidate submission."""
@@ -870,6 +1515,16 @@ class SubmissionValidation:
             raise ValueError("Invalid submission: " + "; ".join(self.errors))
 
 
+# %% [markdown]
+# ### Supplied helper — `build_submission`
+#
+# Copy the sample and optionally align predictions using unique (possibly composite) IDs.
+#
+# Without IDs, predictions must already be in sample order. Prefer explicit IDs for inference.
+# Alignment rejects missing, duplicate, extra, or absent keys rather than guessing row order.
+
+
+# %% [provided] [stage-11]
 def build_submission(
     sample: pd.DataFrame,
     predictions: Mapping[str, Sequence[object]],
@@ -920,6 +1575,13 @@ def build_submission(
     return submission
 
 
+# %% [markdown]
+# ### Supplied helper — `validate_submission`
+#
+# Check schema, row count, ID order, missing values, and optional allowed labels.
+
+
+# %% [provided] [stage-11]
 def validate_submission(
     submission: pd.DataFrame,
     sample: pd.DataFrame,
@@ -965,6 +1627,13 @@ def validate_submission(
     return SubmissionValidation(valid=not errors, errors=errors, warnings=warnings)
 
 
+# %% [markdown]
+# ### Supplied helper — `write_submission`
+#
+# Validate then atomically write a UTF-8 CSV submission.
+
+
+# %% [provided] [stage-11]
 def write_submission(
     submission: pd.DataFrame,
     path: Path | str,
@@ -990,6 +1659,14 @@ def write_submission(
     return destination
 
 
+# %% [markdown]
+# ### Supplied helper — `_mapping`
+#
+# Run this supplied definition before its callers. Its inputs and invariants are explained in this
+# section.
+
+
+# %% [provided] [stage-11]
 def _mapping(value: Any) -> Mapping[str, Any]:
     if is_dataclass(value):
         return asdict(value)
@@ -998,6 +1675,13 @@ def _mapping(value: Any) -> Mapping[str, Any]:
     raise TypeError("Expected a dataclass or mapping")
 
 
+# %% [markdown]
+# ### Supplied helper — `technical_report`
+#
+# Render the standard competition handoff report as Markdown text.
+
+
+# %% [provided] [stage-11]
 def technical_report(
     *,
     task: str,
@@ -1036,6 +1720,13 @@ def technical_report(
     return "\n".join(lines) + "\n"
 
 
+# %% [markdown]
+# ### Supplied helper — `write_technical_report`
+#
+# Write a UTF-8 technical report, creating its parent directory.
+
+
+# %% [provided] [stage-11]
 def write_technical_report(content: str, path: Path | str) -> Path:
     """Write a UTF-8 technical report, creating its parent directory."""
     destination = Path(path)
@@ -1044,6 +1735,13 @@ def write_technical_report(content: str, path: Path | str) -> Path:
     return destination
 
 
+# %% [markdown]
+# ### Supplied helper — `record_run`
+#
+# Save configuration/fold positions and a matching human-readable technical report.
+
+
+# %% [provided] [stage-11]
 def record_run(
     output_dir: Path | str,
     *,
@@ -1091,13 +1789,84 @@ def record_run(
     return write_technical_report(report, root / "technical_report.md")
 
 
-# >>> exercise: align predictions to sample IDs and validate the complete file
-submission = build_submission(
-    sample, output_values, prediction_ids=test[ID_COLUMN], id_columns=ID_COLUMN
+# %% [markdown]
+# ### Exercise 8 — `deliver_submission`
+#
+# Input: sample template, named predictions, prediction IDs, key-column name and output path.
+# Return: ID-aligned checked frame and saved CSV path. Reject duplicated, missing or extra
+# prediction keys.
+#
+# <details>
+# <summary>Hint 1 — choose the operation</summary>
+#
+# One row represents one house. Id is a key, SalePrice is a positive amount, and the submission
+# must contain prices in the original currency scale, not log prices.
+#
+# </details>
+#
+# <details>
+# <summary>Hint 2 — implementation direction</summary>
+#
+# Build by ID, raise validation errors, then write the validated frame. Never assume test order
+# equals sample order.
+#
+# </details>
+
+
+# %% [exercise] [stage-11]
+def deliver_submission(
+    sample_frame: pd.DataFrame,
+    predictions: Mapping[str, Sequence[object]],
+    prediction_ids: Sequence[object],
+    id_column: str,
+    output_path: Path,
+) -> Any:
+    """Input: sample template, named predictions, prediction IDs, key-column name and output
+    path. Return: ID-aligned checked frame and saved CSV path. Reject duplicated, missing or
+    extra prediction keys.
+    """
+    # >>> exercise: implement deliver_submission using the stated contract
+    submission = build_submission(
+        sample_frame, predictions, prediction_ids=prediction_ids, id_columns=id_column
+    )
+    validate_submission(submission, sample_frame, id_columns=id_column).raise_for_errors()
+    destination = write_submission(submission, output_path)
+    # <<< exercise
+    return submission, destination
+
+
+# %% [markdown]
+# **Check before continuing.** Predict the result, run the small test below, and use its assertion
+# message to locate an error. Expected: all assertions pass and the printed success message
+# appears. These checks do not fit the real candidate.
+
+# %% [check] [stage-11]
+toy_sample = pd.DataFrame({"key": ["001", "NA"], "prediction": [0.0, 0.0]})
+toy_submission, toy_path = deliver_submission(
+    toy_sample, {"prediction": [0.8, 0.2]}, ["NA", "001"], "key", OUTPUT / "checks" / "delivery.csv"
 )
-validate_submission(submission, sample, id_columns=ID_COLUMN).raise_for_errors()
-destination = write_submission(submission, OUTPUT / "submission.csv")
-# <<< exercise
+assert toy_submission["key"].tolist() == ["001", "NA"], "Preserve literal IDs and sample order"
+np.testing.assert_allclose(toy_submission["prediction"], [0.2, 0.8])
+toy_loaded = pd.read_csv(toy_path, converters={"key": str}, keep_default_na=False)
+assert toy_loaded["key"].tolist() == ["001", "NA"]
+try:
+    deliver_submission(
+        toy_sample,
+        {"prediction": [0.2, 0.8]},
+        ["001", "001"],
+        "key",
+        OUTPUT / "checks" / "invalid.csv",
+    )
+except ValueError:
+    pass
+else:
+    raise AssertionError("Duplicate prediction IDs must be rejected, not guessed")
+print("Delivery checks passed: shuffled/literal IDs and duplicate rejection.")
+
+# %% [worked] [stage-11]
+submission, destination = deliver_submission(
+    sample, output_values, test[ID_COLUMN], ID_COLUMN, OUTPUT / "submission.csv"
+)
 roundtrip = pd.read_csv(
     destination, converters={ID_COLUMN: str}, keep_default_na=False, float_precision="round_trip"
 )
@@ -1111,23 +1880,18 @@ save_json(
 )
 save_json(
     {
-        "epochs": EPOCHS,
-        "batch_size": BATCH_SIZE,
         "seed": SEED,
         "max_rows": MAX_ROWS,
-        "image_size": IMAGE_SIZE,
         "model_name": MODEL_NAME,
-        "max_length": MAX_LENGTH,
-        "embedding_dim": EMBEDDING_DIM,
         "imbalance_weights": USE_IMBALANCE_WEIGHTS,
-        "history_features": USE_HISTORY_FEATURES,
         "pretrained_allowed": PRETRAINED_ALLOWED,
-        "initial_weight_path": WEIGHT_PATH,
         "asset_provenance": ASSET_PROVENANCE,
         "trainer": globals().get("training"),
     },
     OUTPUT / "lesson_config.json",
 )
+
+# %% [worked] [stage-11]
 record_run(
     OUTPUT,
     task=FAMILY,
@@ -1142,8 +1906,6 @@ record_run(
     inference_options={
         "threshold": float(selected_threshold),
         "label_order": TARGET_COLUMNS,
-        "image_size": IMAGE_SIZE,
-        "max_length": MAX_LENGTH,
         "model_name": MODEL_NAME,
         "asset_provenance": ASSET_PROVENANCE,
     },
@@ -1154,6 +1916,8 @@ record_run(
         f"Imbalance weights enabled: {USE_IMBALANCE_WEIGHTS}",
     ],
 )
+
+# %% [worked] [stage-11]
 pd.DataFrame(
     [
         {
@@ -1166,8 +1930,50 @@ pd.DataFrame(
         }
     ]
 ).to_csv(OUTPUT / "comparison_row.csv", index=False)
-# Save your edited notebook/source alongside this folder before transferring the bundle.
 copied = sync_artifacts(OUTPUT, DURABLE_OUTPUT)
 print("Checked local CSV:", destination, "Durable files copied:", len(copied))
 
-# ruff: noqa: E402
+# %% [check] [stage-11]
+assert destination.is_file()
+assert submission[ID_COLUMN].tolist() == sample[ID_COLUMN].tolist()
+print("Delivery complete. Next: restart inference, then attempt the reconstruction task.")
+
+# %% [markdown]
+# ### Stop and explain
+#
+# Which ID-order or encoding mistake would survive a plausible-looking preview? What did the
+# on-disk round trip prove?
+#
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
+#
+# Shuffled sample IDs and literal strings such as 001/NA require explicit alignment and CSV
+# parsing. Readback checks the delivered file's schema/order/values; official task semantics and
+# upload acceptance still need separate confirmation.
+#
+# </details>
+
+# %% [markdown]
+# ## Transfer and closed-book reconstruction
+#
+# An evaluator switches to raw-price MAE and the pack includes repeat sales of the same property.
+# Explain which target transform, selection score and split must change before rebuilding the
+# baseline.
+#
+# 1. Close the reference notebook and create an empty personal notebook.
+# 2. Rebuild the data contract, split, features/model, fit, official metric and submission path.
+# 3. Deliver a checked small-pack CSV within 45–60 minutes, then reload it in a fresh session.
+# 4. Record elapsed time, hints, bugs and the first function you could not reconstruct.
+# 5. Rebuild that function the next day with a different schema or seed.
+#
+# For the 2k assistant, send one function signature, input/output shapes and one failing toy test.
+# Ask for an explanation or correction of that function only. Keep the rest of the notebook
+# outside the prompt.
+#
+# ### Controlled comparison
+#
+# Compare Ridge and the OOF stack on the same outer holdout. Count all inner fits in runtime.
+# Check a second property/time-aware split before accepting a tiny stacking improvement.
+#
+# A first correct submission is the readiness gate. Advanced complexity is selected only after an
+# honest metric/runtime comparison; no test fitting or model-weight permission is implied.

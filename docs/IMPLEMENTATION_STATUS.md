@@ -10,10 +10,12 @@ Updated 19 October 2026. [Guide index](README.md) · [Practice notebooks](../not
 | Competition kit | 16 task templates, shared trainer, adapters, CLI and validation tools | Yes |
 | Reconstruction drills | Text/table answer key, image exercise and blank-notebook assessments | No project imports in the answer key |
 
-Each learning notebook has 11 competition stages plus optional Kaggle acquisition (12 code cells).
-Baseline exercises have a closed reference cell immediately after each code cell: 84 references
-across seven baselines. Advanced notebooks are reduced, evidence-backed studies; real-dataset
-validation must establish whether their additional cost is justified.
+The 11 competition stages plus optional Kaggle acquisition now contain short, focused cells.
+Each baseline has eight named exercises: **56 exercises across seven families**. Contracts,
+two hint levels, small executable checks and interpretation questions support each lesson.
+Every baseline code cell retains a closed full reference directly afterward. Advanced notebooks
+use explained worked components, checks and controlled comparisons. Real-dataset validation must
+establish whether their extra cost is justified.
 
 All notebooks are generated from adjacent `*_template.py` sources. Make a personal notebook copy
 before studying; rebuilding replaces generated templates. The shared kit and learning lessons
@@ -42,41 +44,59 @@ deliberately have separate runtime implementations so a learning notebook can ru
 See [dataset acquisition](LEARNING_DATASETS.md), [Colab operation](COLAB_RUNBOOK.md) and
 [adaptation recipes](CUSTOMIZATION_GUIDE.md) for instructions rather than implementation history.
 
-## Cleanup
+## Guided lesson design
 
-Removed 28 unused helper definitions and 32 unused imports from the learning sources, retaining
-their self-contained execution and the one-batch training exercise. The CLI replaces a duplicate
-builder script. Old reconciliation snapshots and an empty accidental self-submodule pointer were
-removed; committed versions remain recoverable from Git history. Historical audits and Task 2
-research are in [the archive](archive/README.md). Repeated setup text and obsolete verification
-logs were consolidated. No dataset or personal run directory was removed; an edited Home Credit
-template was preserved as an ignored personal copy before regeneration.
+The first code cells now contain 22–26 lines of imports. Runtime helpers are separate; storage,
+prediction, metric, training and delivery definitions appear in their relevant stages. Supplied
+definitions use standard Jupyter source-fold metadata. Configuration stays visible and omits
+unrelated model settings. HTML hints and full references start closed.
+
+Small behavioral checks cover unknown categories, log-price conventions, independent multilabel
+scores, one optimizer update, rectangular mask geometry, best-checkpoint preservation, self and
+non-self matching, and shuffled literal submission IDs. Neural batches are checked before full
+training. Metric exercises are introduced before fitting and reused on real validation outputs.
+Each pair ends with a task-specific transfer exercise, reconstruction drill and measured ablation.
+
+The [design contract](LEARNING_NOTEBOOK_DESIGN.md) explains authoring and study conventions.
+Historical audits and Task 2 research remain in [the archive](archive/README.md). Your edited
+Home Credit notebook was preserved as an ignored personal copy before redesign; local datasets
+and personal run directories were retained.
 
 ## Verification
 
 Commands below use the installed `uv.exe` at `C:/Users/DELL/.local/bin/uv.exe` because uv is not
 on this machine's PATH. `--no-sync` preserves the existing optional dependency groups.
 
-| Exact command | Cleanup result |
+| Exact command | Redesign result |
 |---|---|
-| `uv --cache-dir .uv-cache run --no-sync ruff format .` | Passed; 108 files unchanged on final run |
+| `uv --cache-dir .uv-cache run --no-sync ruff format .` | Passed |
 | `uv --cache-dir .uv-cache run --no-sync ruff check .` | Passed |
 | `uv --cache-dir .uv-cache run --no-sync olp-ai build-notebooks` | Generated all 30 notebooks |
-| `uv --cache-dir .uv-cache run --no-sync pytest --basetemp .pytest_cache/cleanup-resumed --tb=short` | 113 passed, 1 warning in 223.17 seconds; exit status 0 |
+| `uv --cache-dir .uv-cache run --no-sync pytest --basetemp .pytest_cache/redesign-final --tb=short` | 120 passed, 1 warning in 212.48 seconds; exit status 0 |
+| `uv --cache-dir .uv-cache run --no-sync pytest tests/test_notebooks.py tests/test_learning_notebooks.py -k 'not execute_offline and not copied_notebook and not durable_bundles' --basetemp .pytest_cache/redesign-presentation-recheck --tb=short` | 30 passed, 18 deselected in 18.54 seconds after presentation-only changes |
 | `uv --cache-dir .uv-cache run --no-sync python -m compileall -q src tests scripts notebooks` | Passed |
 | `uv --cache-dir .uv-cache lock --check` | Passed; 261 locked packages, no dependency changes |
 | `git diff --check` and `git diff --cached --check` | Passed |
 
-Additional inspection checked 21 Markdown documents, all 114 local links/heading targets and
-balanced code fences. All 30 maintained notebook artifacts have empty outputs/execution counts.
-The earlier test session's final output was unavailable after interruption, so the resumed run
-saves its log and exit status under the ignored `.pytest_cache/` directory.
+All 14 notebooks passed Jupyter schema validation: 56 exercises, 167 check cells and 532 closed
+baseline references. Credit and Salt HTML exports retained balanced closed details for hints,
+references and reasoning prompts. Twenty-two Markdown documents and 118 local links/heading
+targets passed validation. All 30 maintained notebooks have empty outputs and execution counts.
+
+The final run saves output and exit status under the ignored `.pytest_cache/` directory.
+Individual cells are compiled; completed baseline answers and advanced components
+execute through all non-setup cells individually with repository imports and network blocked.
+Seven additional regression cases inject plausible broken student functions and verify that
+the embedded feedback fails, including a no-op optimizer update and self-only retrieval.
+The final visibility/introductory-text adjustments preserved identical executable ASTs. One
+supplemental test attempt encountered a Windows permission error while renaming a temporary TGS
+dataset folder; the full runs and the fresh-directory follow-up passed that case without changes
+to the downloader. It remains an observed intermittent local filesystem limitation.
 Joblib emitted its Windows physical-core discovery fallback warning. Optional wandb also printed
 ignored temporary-folder cleanup permission errors at process exit in the Windows sandbox;
 these did not fail the tests or change the zero exit status.
 
-The suite exercises completed learning solutions outside the repository with project imports and
-network access blocked; separate Python processes cover table/image routes. It checks notebook
+Separate Python processes cover table/image routes. The suite checks notebook
 generation and exercise placement, inline metrics, split boundaries, data/download safety,
 checkpoints, durable artifacts and full synthetic delivery. Download tests simulate the CLI and
 all seven dataset layouts; they do not access a Kaggle account.

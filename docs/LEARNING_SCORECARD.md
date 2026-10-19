@@ -15,6 +15,8 @@ Imbalance diagnosis and why the chosen response matches the score:
 
 Baseline time to first score / checked CSV / reload:
 TODO blocks completed independently / total attempted:
+Exercise checks passed before revealing a reference:
+Hints used: concept / implementation / full reference:
 Solutions revealed before attempting a block:
 Assistant calls, failed calls, and the function requested each time:
 Most costly mistake and its observable symptom:
@@ -41,6 +43,7 @@ Judge each skill independently:
 | Validate | Justify independent/group/time splitting and hand-check the scorer's boundary cases. |
 | Handle imbalance | Compute support using training only and explain why weighting may help or hurt the official score. |
 | Implement | Fill the missing functions, run their checks and explain each operation. |
+| Diagnose | Explain why a failing toy check points to a shape, metric, fit boundary or update error. |
 | Improve | Connect one error pattern to one change and compare score versus total runtime on the same folds. |
 | Deliver | Restore the saved candidate and produce a correctly ordered file from a fresh runtime. |
 | Transfer | Rebuild under a new schema with no saved code; use the 2k assistant for a bounded gap and survive its failure. |

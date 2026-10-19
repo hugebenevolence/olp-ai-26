@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from html import escape
 from pathlib import Path
 
@@ -45,6 +46,8 @@ def percent_script_to_notebook(source: Path | str, destination: Path | str) -> P
     current: list[str] = []
     kind = "code"
     exercise = False
+    tags: list[str] = []
+    baseline = source_path.parent.name == "learning" and "_baseline_" in source_path.name
 
     def flush() -> None:
         nonlocal current
@@ -58,11 +61,14 @@ def percent_script_to_notebook(source: Path | str, destination: Path | str) -> P
         }
         if kind == "code":
             cell.update({"execution_count": None, "outputs": []})
+            if tags:
+                cell["metadata"] = {"tags": tags.copy()}
+            if "provided" in tags:
+                cell["metadata"]["jupyter"] = {"source_hidden": True}
             if exercise:
                 cell["source"] = _exercise_source(current)
-                cell["metadata"] = {"tags": ["exercise"]}
         cells.append(cell)
-        if exercise and kind == "code":
+        if (exercise or baseline) and kind == "code":
             answer = "".join(
                 line
                 for line in current
@@ -87,6 +93,7 @@ def percent_script_to_notebook(source: Path | str, destination: Path | str) -> P
             flush()
             kind = "markdown" if "[markdown]" in line else "code"
             exercise = "[exercise]" in line
+            tags = [tag for tag in re.findall(r"\[([^]]+)\]", line) if tag != "markdown"]
         else:
             current.append(line)
     flush()

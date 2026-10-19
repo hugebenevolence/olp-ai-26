@@ -10,10 +10,10 @@
 # [Primary solution
 # evidence](https://www.kaggle.com/competitions/shopee-product-matching/writeups/upstage-making-ai-beneficial-1st-place-solution-fr)
 #
-# The first-place write-up emphasizes matching rules over marginal encoder gains and normalizing
-# each modality before fusion. This lesson implements frozen local encoder extraction,
-# normalize-then-concatenate matching and a small threshold comparison. It omits ArcFace
-# training and iterative neighborhood blending.
+# The linked first-place write-up motivates image/text matching and normalized modality fusion.
+# This baseline fits training-title TF-IDF and cosine matching; the advanced companion studies
+# permitted frozen local encoders and fusion. Neither implements ArcFace training or iterative
+# neighborhood blending.
 #
 # **Watch for:** Hold out entire product groups. Matching is transductive gallery inference, not
 # fitting on test labels. Include each item itself.
@@ -28,26 +28,47 @@
 # weights or real Kaggle data are bundled. Keep grading answers closed. Use only explicitly
 # permitted resources. Internet/prepared-code access is not assumed on contest day.
 #
-# Fill only the TODO blocks. Every code cell is followed by a closed Reveal expected code
-# section. Attempt, run, then reveal; equivalent correct implementations are welcome. Record
-# hints needed. Setup/configuration is supplied.
+# Complete the named exercises and their nearby checks in order. Setup and safety helpers are
+# supplied.
 #
 # After the lesson, close both notebooks and rebuild the essential route from memory. See the
 # repository's blank-notebook playbook for the final transfer test.
 #
+# ## How to use this lesson
+#
+# Complete one named exercise, run its nearby checks, then interpret the result. Supplied cells
+# contain setup or integration; edit only configuration or marked exercise bodies. Every baseline
+# code cell retains a collapsed full reference immediately afterward. Use Hint 1, then Hint 2,
+# before opening a reference.
+#
+# By the end you should be able to state the data/metric contract, choose a legal split, construct
+# one correct model input, validate a saved candidate and deliver an ID-aligned file. Mini-checks
+# use tiny separate examples or the current training batch; they do not certify real-data quality.
+#
+#  | Stage | Goal |
+# |---|---|
+# | 1 | Environment and configuration |
+# | 1a | Optional dataset acquisition |
+# | 2 | Understand and load the data contract |
+# | 3 | Inspect examples and distributions |
+# | 4 | Build and test the validation split |
+# | 5 | Measure imbalance and choose a response |
+# | 6 | Build features or one correct batch |
+# | 7 | Connect outputs, loss and official metric |
+# | 8 | Train and preserve a recoverable candidate |
+# | 9 | Interpret validation and compare experiments |
+# | 10 | Reload and infer every test item |
+# | 11 | Deliver and verify the submission |
 
 # %% [markdown]
-# ## 1. Bootstrap and configuration
+# ## 1. Environment and configuration
 #
-# Run this supplied setup cell; edit only configuration values. Later algorithm cells contain
-# TODO blocks. No weights are fetched. The next optional cell can acquire practice data;
-# otherwise stage local data before repeated reads.
-# Each candidate gets a new output directory.
-#
-#
-#
+# Run the supplied imports and runtime helpers in order. Edit paths, time budget and model policy
+# in the configuration cells. Inspect the actual device; CPU checks cannot establish GPU
+# throughput. Supplied storage/safety definitions are folded where the viewer supports it: run
+# them, but reconstruct the short algorithmic functions during closed-book practice.
 
-# %% [exercise]
+# %% [provided] [stage-1]
 import json
 import pickle
 import random
@@ -69,58 +90,15 @@ import pandas as pd
 import torch
 from PIL import Image
 
+# ruff: noqa: E402
 
-def _json_default(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if is_dataclass(value):
-        return asdict(value)
-    if hasattr(value, "tolist"):
-        return value.tolist()
-    raise TypeError(f"Cannot serialize {type(value).__name__} as JSON")
+# %% [markdown]
+# ### Supplied helper — `CompetitionConfig`
+#
+# Explicit notebook state; no installed project is required.
 
 
-def _write(value: Any, path: Path | str, kind: str) -> Path:
-    destination = Path(path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
-    try:
-        if kind == "json":
-            temporary.write_text(
-                json.dumps(
-                    value, default=_json_default, indent=2, ensure_ascii=False, allow_nan=False
-                ),
-                encoding="utf-8",
-            )
-        elif kind == "pickle":
-            with temporary.open("wb") as handle:
-                pickle.dump(value, handle, protocol=pickle.HIGHEST_PROTOCOL)
-        else:
-            import torch
-
-            torch.save(value, temporary)
-        temporary.replace(destination)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return destination
-
-
-def save_json(value: Any, path: Path | str) -> Path:
-    """Atomically save UTF-8 metadata, including paths, dataclasses, and NumPy values."""
-    return _write(value, path, "json")
-
-
-def save_pickle(value: Any, path: Path | str) -> Path:
-    """Atomically save a fitted local pipeline with preprocessing and original label values."""
-    return _write(value, path, "pickle")
-
-
-def load_pickle(path: Path | str) -> Any:
-    """Reload a trusted, locally produced pickle; never load untrusted downloaded pickle files."""
-    with Path(path).open("rb") as handle:
-        return pickle.load(handle)
-
-
+# %% [provided] [stage-1]
 @dataclass
 class CompetitionConfig:
     """Explicit notebook state; no installed project is required."""
@@ -150,6 +128,13 @@ class CompetitionConfig:
         return {**asdict(self), "data_dir": str(self.data_dir), "output_dir": str(self.output_dir)}
 
 
+# %% [markdown]
+# ### Supplied helper — `TimeBudget`
+#
+# Leave delivery time available; a running batch/fit cannot be interrupted safely.
+
+
+# %% [provided] [stage-1]
 class TimeBudget:
     """Leave delivery time available; a running batch/fit cannot be interrupted safely."""
 
@@ -167,6 +152,13 @@ class TimeBudget:
             raise TimeoutError(f"Delivery reserve reached before {stage}")
 
 
+# %% [markdown]
+# ### Supplied helper — `runtime_paths`
+#
+# Media stays on local disk; optional durable storage is an explicit destination.
+
+
+# %% [provided] [stage-1]
 def runtime_paths(
     *, runtime_dir: Path | None = None, persistent_dir: Path | None = None
 ) -> SimpleNamespace:
@@ -186,6 +178,13 @@ def runtime_paths(
     )
 
 
+# %% [markdown]
+# ### Supplied helper — `mount_google_drive`
+#
+# Call only when an explicitly configured Colab path uses Drive.
+
+
+# %% [provided] [stage-1]
 def mount_google_drive() -> None:
     """Call only when an explicitly configured Colab path uses Drive."""
     from google.colab import drive
@@ -193,6 +192,13 @@ def mount_google_drive() -> None:
     drive.mount("/content/drive")
 
 
+# %% [markdown]
+# ### Supplied helper — `stage_data`
+#
+# Copy a folder or extract a ZIP once, then train from the local destination.
+
+
+# %% [provided] [stage-1]
 def stage_data(source: Path | str, destination: Path | str) -> Path:
     """Copy a folder or extract a ZIP once, then train from the local destination."""
     source, destination = Path(source).resolve(), Path(destination).resolve()
@@ -212,32 +218,13 @@ def stage_data(source: Path | str, destination: Path | str) -> Path:
     return destination
 
 
-def sync_artifacts(source: Path | str, destination: Path | str | None) -> list[Path]:
-    """Copy the entire candidate, including encoders, preserving separate run folders."""
-    if destination is None:
-        return []
-    source, destination = Path(source).resolve(), Path(destination).resolve()
-    if (
-        destination == source
-        or destination.is_relative_to(source)
-        or source.is_relative_to(destination)
-    ):
-        raise ValueError("Output and backup folders must be separate")
-    copied = []
-    for path in source.rglob("*"):
-        if path.is_file() and not path.name.endswith(".tmp"):
-            target = destination / path.relative_to(source)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
-            try:
-                shutil.copy2(path, temporary)
-                temporary.replace(target)
-            finally:
-                temporary.unlink(missing_ok=True)
-            copied.append(target)
-    return copied
+# %% [markdown]
+# ### Supplied helper — `gpu_report`
+#
+# Inspect the actual runtime before choosing image size, batch size or precision.
 
 
+# %% [provided] [stage-1]
 def gpu_report() -> dict:
     """Inspect the actual runtime before choosing image size, batch size or precision."""
     if not torch.cuda.is_available():
@@ -251,6 +238,15 @@ def gpu_report() -> dict:
     }
 
 
+# %% [markdown]
+# ### Configure this run
+#
+# Edit these values before proceeding. DATA_DIR points at your staged pack; choose a separate
+# empty folder for an online download. Keep model permission explicit, start with a small row/time
+# budget, and let the actual device report guide neural batch size. Each run writes to a new
+# candidate directory.
+
+# %% [configuration] [stage-1]
 FAMILY, VARIANT = "07_matching", "baseline"
 DATA_ARCHIVE, PERSISTENT_DIR = None, None
 if "google.colab" in sys.modules and any(
@@ -268,20 +264,25 @@ if DATA_ARCHIVE is not None:
 RUN_ID = f"{FAMILY}-{VARIANT}-{uuid4().hex[:8]}"
 OUTPUT = paths.output_dir / "learning" / RUN_ID
 DURABLE_OUTPUT = paths.persistent_dir / RUN_ID if paths.persistent_dir is not None else None
-PRETRAINED_ALLOWED, WEIGHT_PATH = False, None
-SEED, MAX_ROWS, IMAGE_SIZE, BATCH_SIZE, EPOCHS = 42, 6000, 128, 16, 3
+PRETRAINED_ALLOWED = False
+SEED, MAX_ROWS = 42, 6000
 TIME_BUDGET_MINUTES, DELIVERY_RESERVE_MINUTES = 60, 10
 GROUP_COLUMN, TIME_COLUMN = "label_group", None
 USE_IMBALANCE_WEIGHTS = False
-USE_HISTORY_FEATURES = False
-MODEL_NAME = "resnet18"
-IMAGE_SUFFIX = ".png"
-TEXT_MODEL_DIR, IMAGE_MODEL_CHECKPOINT, EMBEDDING_ARCHIVE = None, None, None
+MODEL_NAME = "title_tfidf"
+
+# %% [markdown]
+# ### Configure this run
+#
+# Edit these values before proceeding. DATA_DIR points at your staged pack; choose a separate
+# empty folder for an online download. Keep model permission explicit, start with a small row/time
+# budget, and let the actual device report guide neural batch size. Each run writes to a new
+# candidate directory.
+
+# %% [configuration] [stage-1]
 ASSET_PROVENANCE = (
     ""  # exact asset/version/license; required when enabling local pretrained features
 )
-EMBEDDING_PATH, EMBEDDING_DIM, MAX_LENGTH = None, 64, 128
-THRESHOLD_GRID = (0.3, 0.4, 0.5, 0.6, 0.7)
 competition = CompetitionConfig(
     data_dir=DATA_DIR,
     output_dir=OUTPUT,
@@ -296,11 +297,12 @@ print(gpu_report())
 print("Local data:", DATA_DIR, "New candidate:", OUTPUT)
 
 # %% [markdown]
-# ## 1a. Download the practice dataset (optional, before the timed exercise)
+# ## 1a. Optional dataset acquisition
 #
 # The cell is skipped by default. For online preparation, first accept this competition's
 # rules on its Kaggle page and configure credentials using the
-# [official authentication guide](https://github.com/Kaggle/kaggle-cli/blob/main/docs/README.md#authentication).
+# [official authentication
+# guide](https://github.com/Kaggle/kaggle-cli/blob/main/docs/README.md#authentication).
 # Set DOWNLOAD_DATA=True below. Local uv sync includes the official Kaggle client. In a copied
 # notebook/Colab runtime without it, install only `kaggle>=2.2,<3` before running this cell;
 # do not install this project or replace Colab's torch/NumPy/CUDA stack.
@@ -316,9 +318,71 @@ print("Local data:", DATA_DIR, "New candidate:", OUTPUT)
 # checks the expected layout. On Kaggle itself, attach competition data in the notebook UI,
 # point DATA_DIR at its mounted folder, and leave this switch off. For restricted-room drills,
 # prepare data beforehand and keep this cell disabled. The training timer restarts afterward.
-#
 
-# %% [exercise]
+# %% [markdown]
+# ### Supplied helper — `_json_default`
+#
+# Run this supplied definition before its callers. Its inputs and invariants are explained in this
+# section.
+
+
+# %% [provided] [stage-1a]
+def _json_default(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if is_dataclass(value):
+        return asdict(value)
+    if hasattr(value, "tolist"):
+        return value.tolist()
+    raise TypeError(f"Cannot serialize {type(value).__name__} as JSON")
+
+
+# %% [markdown]
+# ### Supplied helper — `_write`
+#
+# Run this supplied definition before its callers. Its inputs and invariants are explained in this
+# section.
+
+
+# %% [provided] [stage-1a]
+def _write(value: Any, path: Path | str, kind: str) -> Path:
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
+    try:
+        if kind == "json":
+            temporary.write_text(
+                json.dumps(
+                    value, default=_json_default, indent=2, ensure_ascii=False, allow_nan=False
+                ),
+                encoding="utf-8",
+            )
+        elif kind == "pickle":
+            with temporary.open("wb") as handle:
+                pickle.dump(value, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        else:
+            import torch
+
+            torch.save(value, temporary)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
+
+
+# %% [markdown]
+# ### Supplied helper — `save_json`
+#
+# Atomically save UTF-8 metadata, including paths, dataclasses, and NumPy values.
+
+
+# %% [provided] [stage-1a]
+def save_json(value: Any, path: Path | str) -> Path:
+    """Atomically save UTF-8 metadata, including paths, dataclasses, and NumPy values."""
+    return _write(value, path, "json")
+
+
+# %% [configuration] [stage-1a]
 import os
 import subprocess
 from getpass import getpass
@@ -337,7 +401,13 @@ DOWNLOAD_CACHE = DATA_DIR.parent / "_downloads" / KAGGLE_COMPETITION
 DOWNLOAD_TIMEOUT_SECONDS = 7200
 PROMPT_FOR_KAGGLE_TOKEN = "google.colab" in sys.modules
 
+# %% [markdown]
+# ### Supplied helper — `extract_dataset_zip`
+#
+# Extract data without allowing absolute paths, traversal or silent overwrites.
 
+
+# %% [provided] [stage-1a]
 def extract_dataset_zip(source: Path, destination: Path) -> None:
     """Extract data without allowing absolute paths, traversal or silent overwrites."""
     destination = Path(destination).resolve()
@@ -359,6 +429,13 @@ def extract_dataset_zip(source: Path, destination: Path) -> None:
                 shutil.copyfileobj(incoming, outgoing)
 
 
+# %% [markdown]
+# ### Supplied helper — `download_practice_data`
+#
+# Use the official CLI, then publish the complete extracted folder by renaming it.
+
+
+# %% [provided] [stage-1a]
 def download_practice_data(
     competition: str,
     destination: Path,
@@ -472,6 +549,7 @@ def download_practice_data(
     return destination
 
 
+# %% [provided] [stage-1a]
 if DOWNLOAD_DATA:
     if DATA_ARCHIVE is not None:
         raise ValueError("Choose either DATA_ARCHIVE staging or DOWNLOAD_DATA, then rerun setup")
@@ -487,21 +565,20 @@ source_marker = DATA_DIR / ".kaggle-source.json"
 if source_marker.is_file():
     save_json(json.loads(source_marker.read_text(encoding="utf-8")), OUTPUT / "data_source.json")
 print("Download enabled:", DOWNLOAD_DATA, "Dataset folder:", DATA_DIR)
-# Dataset acquisition is preparation time, not part of the measured training/delivery budget.
 budget = TimeBudget(TIME_BUDGET_MINUTES, reserve_minutes=DELIVERY_RESERVE_MINUTES)
 
 # %% [markdown]
-# ## 2. Load data and enforce the contract
+# ## 2. Understand and load the data contract
 #
-# Check schema and identity before fitting. A row is not always a prediction unit: detection has
-# several annotation rows per image, and matching has several records per product.
+# Return a set of matching posting IDs for every query item. The original Shopee contract includes
+# the query itself. Product groups define relevance; pairwise accuracy is not the official mean
+# per-query set F1.
 #
-# Stage the original train/test CSVs and train_images/test_images directories. This matching
-# competition asks for a set of gallery posting IDs per query. The test gallery is used for
-# pairwise inference; no test labels or pseudo-label training are used.
-#
+# Read the first rows, column names and actual shapes below. Expected: unique nonempty prediction
+# IDs; matching test/sample ID sets; a target schema that agrees with the official output. Dataset
+# size depends on your local files and MAX_ROWS.
 
-# %% [exercise]
+# %% [worked] [stage-2]
 ID_COLUMN, TARGET_COLUMNS = "posting_id", ["matches"]
 train = pd.read_csv(DATA_DIR / "train.csv", converters={ID_COLUMN: str, "label_group": str})
 test = pd.read_csv(DATA_DIR / "test.csv", converters={ID_COLUMN: str})
@@ -510,7 +587,6 @@ train["title"] = train["title"].fillna("")
 test["title"] = test["title"].fillna("")
 train["_image"] = "train_images/" + train["image"]
 test["_image"] = "test_images/" + test["image"]
-
 if MAX_ROWS is not None and len(train) > MAX_ROWS:
     group_sizes = train.groupby("label_group").size().sample(frac=1, random_state=SEED)
     # Keep whole groups, including the group that crosses the approximate row budget.
@@ -527,22 +603,41 @@ assert not set(train[ID_COLUMN]) & set(test[ID_COLUMN])
 assert set(test[ID_COLUMN]) == set(sample[ID_COLUMN])
 assert sample.columns.tolist() == [ID_COLUMN, *TARGET_COLUMNS]
 print(train.head(3).to_string(index=False))
-print("Shapes:", train.shape, test.shape, sample.shape)
 
+# %% [worked] [stage-2]
+print("Shapes:", train.shape, test.shape, sample.shape)
 if train["label_group"].eq("").any() or train["label_group"].isna().any():
     raise ValueError("Every training item needs a product-group identity")
 
-# %% [markdown]
-# ## 3. Inspect and visualize the data
-#
-# Write down three observations from these plots before revealing any solution: missingness,
-# examples that look wrong, and a possible leakage unit. Never select experiments using hidden
-# test labels.
-#
-#
-#
+# %% [check] [stage-2]
+assert len(train) > 0 and len(test) == len(sample)
+assert train[ID_COLUMN].is_unique and sample[ID_COLUMN].is_unique
+print("Data-contract checks passed: prediction units and sample coverage.")
 
-# %% [exercise]
+# %% [markdown]
+# ### Stop and explain
+#
+# What is the prediction unit, and which columns may enter the model?
+#
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
+#
+# Return a set of matching posting IDs for every query item. The original Shopee contract includes
+# the query itself. Product groups define relevance; pairwise accuracy is not the official mean
+# per-query set F1.
+#
+# </details>
+
+# %% [markdown]
+# ## 3. Inspect examples and distributions
+#
+# Inspect the plotted examples before selecting a model. Write observations before reading the
+# next section.
+#
+# How large are product groups? Do duplicate titles or images cross identities? Inspect examples
+# with similar words but different products and different titles for the same product.
+
+# %% [worked] [stage-3]
 group_sizes = train.groupby("label_group").size()
 print("Product group-size quantiles:", group_sizes.quantile([0, 0.5, 0.9, 1]).to_dict())
 print("Singleton product fraction:", (group_sizes == 1).mean())
@@ -558,21 +653,36 @@ plt.show()
 plt.close(fig)
 
 # %% [markdown]
-# ## 4. Freeze a leakage-aware split
+# ### Stop and explain
 #
-# Keep these exact folds for baseline/advanced comparisons. Random stratification is only
-# appropriate for independent samples. Set a group or time column when the acquisition process
-# demands it; assert the chosen boundary.
+# Record three observations: one distribution issue, one suspicious example, and one possible
+# leakage source. What experiment does each justify?
 #
-# A product-group holdout estimates generalization to unseen products. A random item split can
-# expose the same product on both sides. This exercise always holds out label_group,
-# independently of the generic GROUP_COLUMN field.
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
 #
+# Use the actual plots and rows; there is no fixed answer independent of your pack. Convert each
+# observation into a falsifiable check before spending training time.
+#
+# </details>
 
-# %% [exercise]
+# %% [markdown]
+# ## 4. Build and test the validation split
+#
+# Hold out entire label_group values. Random item or pair splits leak product identity.
+# Validation/test gallery comparisons are inference in this task; vocabulary or encoder fitting on
+# test still requires explicit permission.
+
+# %% [worked] [stage-4]
 from sklearn.model_selection import GroupShuffleSplit, StratifiedGroupKFold, train_test_split
 
+# %% [markdown]
+# ### Supplied helper — `SplitResult`
+#
+# Training/validation tables plus their original positional indexes.
 
+
+# %% [provided] [stage-4]
 @dataclass(slots=True)
 class SplitResult:
     """Training/validation tables plus their original positional indexes."""
@@ -583,6 +693,14 @@ class SplitResult:
     valid_indices: np.ndarray
 
 
+# %% [markdown]
+# ### Supplied helper — `_stratification_key`
+#
+# Run this supplied definition before its callers. Its inputs and invariants are explained in this
+# section.
+
+
+# %% [provided] [stage-4]
 def _stratification_key(frame: pd.DataFrame, targets: Sequence[str]) -> pd.Series:
     if not targets:
         raise ValueError("At least one target is required for stratification")
@@ -591,6 +709,13 @@ def _stratification_key(frame: pd.DataFrame, targets: Sequence[str]) -> pd.Serie
     return frame[list(targets)].astype(str).agg("|".join, axis=1)
 
 
+# %% [markdown]
+# ### Supplied helper — `make_split`
+#
+# Create a deterministic holdout with leakage-aware group and time options.
+
+
+# %% [provided] [stage-4]
 def make_split(
     frame: pd.DataFrame,
     *,
@@ -661,34 +786,163 @@ def make_split(
     )
 
 
+# %% [worked] [stage-4]
 if TIME_COLUMN:
     raise ValueError("Use group holdout here; design temporal gallery evaluation separately")
-# >>> exercise: hold out complete product groups, not random pairs or random items
-split = make_split(train, group_column="label_group", valid_size=0.2, seed=SEED)
-tr, va = split.train.copy(), split.valid.copy()
-# <<< exercise
+
+# %% [markdown]
+# ### Exercise 1 — `create_holdout`
+#
+# Input: a row-per-prediction table and its actual leakage columns. Return: the split record and
+# independent training/validation copies. The union must retain all rows; identities must not
+# cross folds.
+#
+# <details>
+# <summary>Hint 1 — choose the operation</summary>
+#
+# Hold out entire label_group values. Random item or pair splits leak product identity.
+# Validation/test gallery comparisons are inference in this task; vocabulary or encoder fitting on
+# test still requires explicit permission.
+#
+# </details>
+#
+# <details>
+# <summary>Hint 2 — implementation direction</summary>
+#
+# Use make_split with valid_size=0.2; return copies of its train and valid tables.
+#
+# </details>
+
+
+# %% [exercise] [stage-4]
+def create_holdout(
+    frame: pd.DataFrame,
+    target_columns: Any = None,
+    group_column: str | None = None,
+    time_column: str | None = None,
+    seed: int = 42,
+) -> Any:
+    """Input: a row-per-prediction table and its actual leakage columns. Return: the split
+    record and independent training/validation copies. The union must retain all rows;
+    identities must not cross folds.
+    """
+    # >>> exercise: implement create_holdout using the stated contract
+    split = make_split(
+        frame,
+        target_columns=target_columns,
+        group_column=group_column,
+        time_column=time_column,
+        valid_size=0.2,
+        seed=seed,
+    )
+    tr, va = split.train.copy(), split.valid.copy()
+    # <<< exercise
+    return split, tr, va
+
+
+# %% [markdown]
+# **Check before continuing.** Predict the result, run the small test below, and use its assertion
+# message to locate an error. Expected: all assertions pass and the printed success message
+# appears. These checks do not fit the real candidate.
+
+# %% [check] [stage-4]
+toy_frame = pd.DataFrame({"id": range(12), "group": np.repeat(range(6), 2)})
+toy_split, toy_train, toy_valid = create_holdout(toy_frame, group_column="group", seed=7)
+assert len(toy_train) + len(toy_valid) == 12, "The split must retain every row"
+assert not set(toy_train["group"]) & set(toy_valid["group"]), "Repeated identities leaked"
+assert not set(toy_split.train_indices) & set(toy_split.valid_indices)
+toy_again = create_holdout(toy_frame, group_column="group", seed=7)[0]
+np.testing.assert_array_equal(toy_split.valid_indices, toy_again.valid_indices)
+print("Split checks passed: complete, group-disjoint and reproducible.")
+
+# %% [worked] [stage-4]
+split, tr, va = create_holdout(
+    train, target_columns=None, group_column="label_group", time_column=TIME_COLUMN, seed=SEED
+)
 assert not set(tr["label_group"]) & set(va["label_group"])
 assert not set(tr[ID_COLUMN]) & set(va[ID_COLUMN])
 print("Held-out product groups:", va["label_group"].nunique(), "Gallery items:", len(va))
 
-# %% [markdown]
-# ## 5. Audit imbalance and choose a response
-#
-# Measure prevalence on the training fold. Choose the response according to the official score:
-# class weights, positive weights, coverage sampling or a log target are hypotheses. Compare
-# with the unweighted candidate on the same split. Never rebalance validation.
-#
-# Most arbitrary item pairs are negatives. Pairwise accuracy would reward predicting no matches.
-# Mean per-query set F1 and group-aware validation match the actual decision problem; a later
-# supervised metric-learning sampler should reflect product identities.
-#
+# %% [check] [stage-4]
+assert len(tr) > 0 and len(va) > 0
+assert not set(tr[ID_COLUMN]) & set(va[ID_COLUMN])
+print("Actual-fold checks passed: nonempty disjoint prediction IDs.")
 
-# %% [exercise]
-# >>> exercise: measure group-size imbalance, which determines positive/negative pair imbalance
-sizes = tr.groupby("label_group").size()
-positive_pairs = int((sizes * (sizes - 1) / 2).sum())
-all_pairs = len(tr) * (len(tr) - 1) // 2
-# <<< exercise
+# %% [markdown]
+# ### Stop and explain
+#
+# Would a random row split measure the generalization you need here? Identify the boundary that
+# would leak information.
+#
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
+#
+# Hold out entire label_group values. Random item or pair splits leak product identity.
+# Validation/test gallery comparisons are inference in this task; vocabulary or encoder fitting on
+# test still requires explicit permission.
+#
+# </details>
+
+# %% [markdown]
+# ## 5. Measure imbalance and choose a response
+#
+# Large product groups create many more positive pairs: a group of k items has k(k-1)/2 pairs
+# excluding self. Measure this on training groups and avoid overrepresenting a few large products
+# if training a pair model.
+#
+# $F1_i=2|P_i\cap T_i|/(|P_i|+|T_i|)$, averaged over queries. A self-only prediction can score
+# above zero without retrieving another product item.
+
+# %% [markdown]
+# ### Exercise 2 — `positive_pair_counts`
+#
+# Input: one training product-group label per item. Return: group sizes, positive unordered pair
+# count and all unordered non-self pairs.
+#
+# <details>
+# <summary>Hint 1 — choose the operation</summary>
+#
+# Large product groups create many more positive pairs: a group of k items has k(k-1)/2 pairs
+# excluding self. Measure this on training groups and avoid overrepresenting a few large products
+# if training a pair model.
+#
+# </details>
+#
+# <details>
+# <summary>Hint 2 — implementation direction</summary>
+#
+# Each group of size k contributes k*(k-1)/2 positive pairs; calculate the full denominator from
+# the number of items.
+#
+# </details>
+
+
+# %% [exercise] [stage-5]
+def positive_pair_counts(groups: pd.Series) -> Any:
+    """Input: one training product-group label per item. Return: group sizes, positive
+    unordered pair count and all unordered non-self pairs.
+    """
+    # >>> exercise: implement positive_pair_counts using the stated contract
+    sizes = groups.value_counts()
+    positive_pairs = int((sizes * (sizes - 1) / 2).sum())
+    all_pairs = len(groups) * (len(groups) - 1) // 2
+    # <<< exercise
+    return sizes, positive_pairs, all_pairs
+
+
+# %% [markdown]
+# **Check before continuing.** Predict the result, run the small test below, and use its assertion
+# message to locate an error. Expected: all assertions pass and the printed success message
+# appears. These checks do not fit the real candidate.
+
+# %% [check] [stage-5]
+toy_sizes, toy_positive, toy_all = positive_pair_counts(pd.Series(["a", "a", "b"]))
+assert toy_positive == 1 and toy_all == 3
+assert int(toy_sizes.sum()) == 3
+print("Pair-count checks passed: one positive among three unordered non-self pairs.")
+
+# %% [worked] [stage-5]
+sizes, positive_pairs, all_pairs = positive_pair_counts(tr["label_group"])
 print("Positive pairs:", positive_pairs, "All pairs:", all_pairs)
 print("Response: group holdout and per-query F1; keep validation unchanged")
 print("For metric learning later: sample product groups, not all pairs equally.")
@@ -699,39 +953,173 @@ plt.show()
 plt.close()
 
 # %% [markdown]
-# ## 6. Build features or datasets
+# ### Stop and explain
 #
-# Inspect one transformed example or batch. Explain its shape, range, label encoding and
-# train/validation/test consistency. Fitted preprocessing sees the training fold only.
+# Does changing training weights also change the official score or validation distribution? What
+# would justify enabling the response?
 #
-# Titles are transformed using a vocabulary fitted only on training products. Unknown validation
-# terms are an expected limitation, not a reason to fit on validation/test.
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
 #
+# Large product groups create many more positive pairs: a group of k items has k(k-1)/2 pairs
+# excluding self. Measure this on training groups and avoid overrepresenting a few large products
+# if training a pair model.
+#
+# </details>
 
-# %% [exercise]
+# %% [markdown]
+# ## 6. Build features or one correct batch
+#
+# Fit title TF-IDF on training products only. L2-normalized sparse title features allow cosine
+# similarity. Transform validation/test titles with the saved vocabulary, keeping gallery row
+# order tied to posting_id.
+
+# %% [worked] [stage-6]
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-# >>> exercise: use a training-title vocabulary; test is transformed, never fitted
-vectorizer = TfidfVectorizer(ngram_range=(1, 2), min_df=1, max_features=60000, sublinear_tf=True)
-# <<< exercise
+# %% [markdown]
+# ### Exercise 3 — `make_text_features`
+#
+# Return an unfitted word unigram/bigram TF-IDF vectorizer. Vocabulary and IDF will be learned
+# only in the training step; construction must not read validation or test text.
+#
+# <details>
+# <summary>Hint 1 — choose the operation</summary>
+#
+# Fit title TF-IDF on training products only. L2-normalized sparse title features allow cosine
+# similarity. Transform validation/test titles with the saved vocabulary, keeping gallery row
+# order tied to posting_id.
+#
+# </details>
+#
+# <details>
+# <summary>Hint 2 — implementation direction</summary>
+#
+# Use ngram_range=(1,2), min_df=1, max_features=60000 and sublinear_tf=True.
+#
+# </details>
+
+
+# %% [exercise] [stage-6]
+def make_text_features() -> Any:
+    """Return an unfitted word unigram/bigram TF-IDF vectorizer. Vocabulary and IDF will be
+    learned only in the training step; construction must not read validation or test text.
+    """
+    # >>> exercise: implement make_text_features using the stated contract
+    vectorizer = TfidfVectorizer(
+        ngram_range=(1, 2), min_df=1, max_features=60000, sublinear_tf=True
+    )
+    # <<< exercise
+    return vectorizer
+
+
+# %% [markdown]
+# **Check before continuing.** Predict the result, run the small test below, and use its assertion
+# message to locate an error. Expected: all assertions pass and the printed success message
+# appears. These checks do not fit the real candidate.
+
+# %% [check] [stage-6]
+toy_vectorizer = make_text_features()
+toy_vectorizer.fit(["red leaf", "green leaf", "green stem"])
+toy_features = toy_vectorizer.transform(["unseenword leaf", ""])
+assert toy_features.shape[0] == 2
+assert "unseenword" not in toy_vectorizer.vocabulary_, "Transformation must not refit vocabulary"
+assert np.isfinite(toy_features.data).all()
+print("Text feature checks passed: new words and empty text are handled without fitting.")
+
+# %% [worked] [stage-6]
+vectorizer = make_text_features()
 print("Training title preview:", tr["title"].head(3).tolist())
 
 # %% [markdown]
-# ## 7. Define the model and loss
+# ### Stop and explain
 #
-# State why the output dimension and loss fit this prediction contract. First verify the
-# simplest model. Pretrained initialization is disabled unless the exact local asset is
-# permitted.
+# State the feature/batch shapes and the exact point at which preprocessing is fitted. What
+# happens to a previously unseen validation input?
 #
-# The similarity calculation uses query batches rather than an N-by-N dense allocation. Its
-# output can still be large if the threshold returns nearly every item; inspect match-count
-# distributions.
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
 #
+# Fit title TF-IDF on training products only. L2-normalized sparse title features allow cosine
+# similarity. Transform validation/test titles with the saved vocabulary, keeping gallery row
+# order tied to posting_id.
+#
+# </details>
 
-# %% [exercise]
+# %% [markdown]
+# ## 7. Connect outputs, loss and official metric
+#
+# Compare title cosine scores in bounded query batches. Every query must include itself exactly
+# once, including zero-feature titles. Batch size must not change the returned match sets.
+
+# %% [markdown]
+# ### Supplied helper — `save_pickle`
+#
+# Atomically save a fitted local pipeline with preprocessing and original label values.
+
+
+# %% [provided] [stage-7]
+def save_pickle(value: Any, path: Path | str) -> Path:
+    """Atomically save a fitted local pipeline with preprocessing and original label values."""
+    return _write(value, path, "pickle")
+
+
+# %% [markdown]
+# ### Supplied helper — `load_pickle`
+#
+# Reload a trusted, locally produced pickle; never load untrusted downloaded pickle files.
+
+
+# %% [provided] [stage-7]
+def load_pickle(path: Path | str) -> Any:
+    """Reload a trusted, locally produced pickle; never load untrusted downloaded pickle files."""
+    with Path(path).open("rb") as handle:
+        return pickle.load(handle)
+
+
+# %% [markdown]
+# ### Supplied helper — `sync_artifacts`
+#
+# Copy the entire candidate, including encoders, preserving separate run folders.
+
+
+# %% [provided] [stage-7]
+def sync_artifacts(source: Path | str, destination: Path | str | None) -> list[Path]:
+    """Copy the entire candidate, including encoders, preserving separate run folders."""
+    if destination is None:
+        return []
+    source, destination = Path(source).resolve(), Path(destination).resolve()
+    if (
+        destination == source
+        or destination.is_relative_to(source)
+        or source.is_relative_to(destination)
+    ):
+        raise ValueError("Output and backup folders must be separate")
+    copied = []
+    for path in source.rglob("*"):
+        if path.is_file() and not path.name.endswith(".tmp"):
+            target = destination / path.relative_to(source)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+            try:
+                shutil.copy2(path, temporary)
+                temporary.replace(target)
+            finally:
+                temporary.unlink(missing_ok=True)
+            copied.append(target)
+    return copied
+
+
+# %% [worked] [stage-7]
 from sklearn.metrics.pairwise import cosine_similarity
 
+# %% [markdown]
+# ### Worked component — `matching_f1`
+#
+# Shopee mean per-query set F1, including the query itself in its group and prediction.
 
+
+# %% [worked] [stage-7]
 def matching_f1(groups: Sequence[object], matches: Sequence[Sequence[int]]) -> float:
     """Shopee mean per-query set F1, including the query itself in its group and prediction."""
     labels = np.asarray(groups)
@@ -747,6 +1135,29 @@ def matching_f1(groups: Sequence[object], matches: Sequence[Sequence[int]]) -> f
     return float(np.mean(values))
 
 
+# %% [markdown]
+# ### Exercise 4 — `match_positions`
+#
+# Input: row-aligned features [N,D], cosine threshold and query batch size. Return N lists of
+# gallery positions including self exactly once. Changing batch size must not change the sets.
+#
+# <details>
+# <summary>Hint 1 — choose the operation</summary>
+#
+# Compare title cosine scores in bounded query batches. Every query must include itself exactly
+# once, including zero-feature titles. Batch size must not change the returned match sets.
+#
+# </details>
+#
+# <details>
+# <summary>Hint 2 — implementation direction</summary>
+#
+# bound the dense query-by-gallery matrix and always include self
+#
+# </details>
+
+
+# %% [exercise] [stage-7]
 def match_positions(features, threshold, batch_size=32):
     if not 0 < threshold <= 1:
         raise ValueError("Choose a cosine threshold in (0, 1]")
@@ -761,45 +1172,200 @@ def match_positions(features, threshold, batch_size=32):
     return matches
 
 
+# %% [markdown]
+# **Check before continuing.** Predict the result, run the small test below, and use its assertion
+# message to locate an error. Expected: all assertions pass and the printed success message
+# appears. These checks do not fit the real candidate.
+
+# %% [check] [stage-7]
+toy_vectors = np.eye(3, dtype=np.float32)
+assert match_positions(toy_vectors, 0.8, batch_size=1) == [[0], [1], [2]]
+assert match_positions(toy_vectors, 0.8, batch_size=3) == [[0], [1], [2]], (
+    "Batching changed results"
+)
+toy_duplicates = np.array([[1, 0], [1, 0], [0, 1]], dtype=np.float32)
+assert match_positions(toy_duplicates, 0.8, batch_size=1) == [[0, 1], [0, 1], [2]], (
+    "Retrieve matching items, not just self"
+)
+assert match_positions(toy_duplicates, 0.8, batch_size=3) == [[0, 1], [0, 1], [2]]
+toy_zero = np.zeros((2, 3), dtype=np.float32)
+assert match_positions(toy_zero, 0.8, batch_size=1) == [[0], [1]], (
+    "Zero-feature items still need self"
+)
+print("Matching checks passed: self inclusion and batch-size invariance.")
+
+# %% [markdown]
+# ### Worked component — `features_for`
+#
+# Run this supplied definition before its callers. Its inputs and invariants are explained in this
+# section.
+
+
+# %% [worked] [stage-7]
 def features_for(frame, weight=0.0):
     return vectorizer.transform(frame["title"])
 
 
+# %% [worked] [stage-7]
 MODEL_DESCRIPTION = "training-title TF-IDF cosine matching"
 
 # %% [markdown]
-# ## 8. Train and preserve the candidate
+# ### Exercise 5 — `score_match_sets`
 #
-# First fit a tiny subset as a debugging drill; rebuild before the real-fold experiment. Main
-# torch lessons define their small training loop directly below, including precision, time
-# reserves and atomic best checkpoints. For sklearn fit the full preprocessing pipeline together.
+# Input: validation group labels and complete predicted gallery-index sets, including self. Return
+# mean per-query set F1, not binary pair accuracy.
 #
-# The fit operation learns vocabulary and IDF on training products. Cosine comparisons within
-# the validation/test gallery are inference under this original task's contract.
+# <details>
+# <summary>Hint 1 — choose the operation</summary>
 #
+# Score complete predicted sets including self. Inspect false merges, missed group members and
+# match counts. Self-only is an informative reference, not proof of useful retrieval. A second
+# group split checks threshold optimism.
+#
+# </details>
+#
+# <details>
+# <summary>Hint 2 — implementation direction</summary>
+#
+# Pass complete sets and labels in the same gallery order to matching_f1.
+#
+# </details>
 
-# %% [exercise]
-started = perf_counter()
-budget.checkpoint("fit training-title vocabulary")
-# >>> exercise: fit on training products only and preserve that vocabulary
-vectorizer.fit(tr["title"])
-checkpoint_path = save_pickle(vectorizer, OUTPUT / "vectorizer.pkl")
-# <<< exercise
-fit_seconds = perf_counter() - started
+
+# %% [exercise] [stage-7]
+def score_match_sets(groups: Sequence[object], positions: Sequence[Sequence[int]]) -> Any:
+    """Input: validation group labels and complete predicted gallery-index sets, including
+    self. Return mean per-query set F1, not binary pair accuracy.
+    """
+    # >>> exercise: implement score_match_sets using the stated contract
+    value = matching_f1(groups, positions)
+    # <<< exercise
+    return value
+
 
 # %% [markdown]
-# ## 9. Validate, inspect errors and compare cost
-#
-# Use all validation predictions for the exact score. Inspect individual mistakes and
-# minority/group performance; the diagnostic metric does not replace the official metric. Keep a
-# score/runtime ledger before choosing more complexity.
-#
-# The bounded grid chooses thresholds/mixture weights on validation only. This reuse makes tiny
-# gains optimistic; check a second product-group split when worthwhile. Preserve the baseline
-# comparison and include full embedding extraction/inference cost.
-#
+# **Check before continuing.** Predict the result, run the small test below, and use its assertion
+# message to locate an error. Expected: all assertions pass and the printed success message
+# appears. These checks do not fit the real candidate.
 
-# %% [exercise]
+# %% [check] [stage-7]
+assert score_match_sets(["a", "a", "b"], [[0, 1], [0, 1], [2]]) == 1
+np.testing.assert_allclose(score_match_sets(["a", "a", "b"], [[0], [1], [2]]), 7 / 9)
+print("Set-F1 checks passed: complete sets score one; self-only scores 7/9 on this gallery.")
+
+# %% [markdown]
+# ### Stop and explain
+#
+# Explain the output shape, loss and prediction decoding without reading the implementation. Which
+# convention would silently produce an invalid score?
+#
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
+#
+# Compare title cosine scores in bounded query batches. Every query must include itself exactly
+# once, including zero-feature titles. Batch size must not change the returned match sets. Score
+# complete predicted sets including self. Inspect false merges, missed group members and match
+# counts. Self-only is an informative reference, not proof of useful retrieval. A second group
+# split checks threshold optimism.
+#
+# </details>
+
+# %% [markdown]
+# ## 8. Train and preserve a recoverable candidate
+#
+# The sparse route fits vocabulary/IDF on training products. The advanced route persists permitted
+# feature/encoder assets and selects its mixture on validation. Count feature extraction and
+# selection in total runtime.
+
+# %% [worked] [stage-8]
+started = perf_counter()
+budget.checkpoint("fit training-title vocabulary")
+
+# %% [markdown]
+# ### Exercise 6 — `fit_candidate`
+#
+# Fit only the supplied training data and atomically persist the entire fitted candidate under
+# output_dir. Return its checkpoint path. The caller must not pass validation/test data to this
+# function.
+#
+# <details>
+# <summary>Hint 1 — choose the operation</summary>
+#
+# The sparse route fits vocabulary/IDF on training products. The advanced route persists permitted
+# feature/encoder assets and selects its mixture on validation. Count feature extraction and
+# selection in total runtime.
+#
+# </details>
+#
+# <details>
+# <summary>Hint 2 — implementation direction</summary>
+#
+# Fit the supplied object, then save_pickle the same fitted object. Persist preprocessing with the
+# estimator.
+#
+# </details>
+
+
+# %% [exercise] [stage-8]
+def fit_candidate(candidate: Any, training_text: Sequence[str], output_dir: Path) -> Any:
+    """Fit only the supplied training data and atomically persist the entire fitted candidate
+    under output_dir. Return its checkpoint path. The caller must not pass validation/test
+    data to this function.
+    """
+    # >>> exercise: implement fit_candidate using the stated contract
+    candidate.fit(training_text)
+    checkpoint_path = save_pickle(candidate, output_dir / "vectorizer.pkl")
+    # <<< exercise
+    return checkpoint_path
+
+
+# %% [markdown]
+# **Check before continuing.** Predict the result, run the small test below, and use its assertion
+# message to locate an error. Expected: all assertions pass and the printed success message
+# appears. These checks do not fit the real candidate.
+
+# %% [check] [stage-8]
+toy_vectorizer = make_text_features()
+toy_path = fit_candidate(
+    toy_vectorizer, ["red product", "green product"], OUTPUT / "checks" / "fit"
+)
+toy_restored = load_pickle(toy_path)
+assert "red" in toy_restored.vocabulary_ and "testonlyword" not in toy_restored.vocabulary_
+assert toy_restored.transform(["testonlyword"]).shape[0] == 1
+print("Fit/reload checks passed: saved training vocabulary handles a new title.")
+
+# %% [worked] [stage-8]
+checkpoint_path = fit_candidate(vectorizer, tr["title"], OUTPUT)
+fit_seconds = perf_counter() - started
+
+# %% [check] [stage-8]
+assert checkpoint_path.is_file(), "No saved candidate is available for inference"
+assert np.isfinite(fit_seconds) and fit_seconds >= 0
+print("Candidate checks passed: persisted artifact and measured fit time.")
+
+# %% [markdown]
+# ### Stop and explain
+#
+# What evidence proves the saved artifact can reproduce inference? Which training state is not
+# promised by this reload?
+#
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
+#
+# Keep architecture/preprocessing, label order and best weights together, then compare reloaded
+# validation predictions. This lesson preserves inference recovery, not an exact continuation of
+# optimizer/scaler/random state.
+#
+# </details>
+
+# %% [markdown]
+# ## 9. Interpret validation and compare experiments
+#
+# Score complete predicted sets including self. Inspect false merges, missed group members and
+# match counts. Self-only is an informative reference, not proof of useful retrieval. A second
+# group split checks threshold optimism.
+
+# %% [worked] [stage-9]
 selection_started = perf_counter()
 weights_to_compare = (0.0,)
 thresholds = (0.5,)
@@ -809,9 +1375,7 @@ for weight in weights_to_compare:
         budget.checkpoint("validation matching comparison")
         features = features_for(va, weight)
         positions = match_positions(features, threshold)
-        # >>> exercise: score complete match sets including self, not pairwise accuracy
-        value = matching_f1(va["label_group"].tolist(), positions)
-        # <<< exercise
+        value = score_match_sets(va["label_group"].tolist(), positions)
         comparisons.append({"weight": weight, "threshold": threshold, "score": value})
 print(
     "Self-only reference F1:",
@@ -825,6 +1389,8 @@ validation_positions = match_positions(features_for(va, selected_weight), select
 fit_seconds += perf_counter() - selection_started
 print("Validation-only comparison:", comparison.to_string(index=False))
 comparison.to_csv(OUTPUT / "threshold_comparison.csv", index=False)
+
+# %% [worked] [stage-9]
 errors = pd.DataFrame(
     {
         ID_COLUMN: va[ID_COLUMN],
@@ -845,23 +1411,65 @@ plt.savefig(OUTPUT / "validation.png")
 plt.show()
 plt.close()
 
-# %% [markdown]
-# ## 10. Reload and run complete inference
-#
-# Rebuild or reload the saved candidate before test inference. Preserve ID order through the
-# loader, then align to the sample by ID. Check that reloaded validation predictions agree. This
-# is inference recovery, not exact training continuation.
-#
-#
-#
+# %% [check] [stage-9]
+assert np.isfinite(validation_score), "Selection requires a finite official score"
+print("Validation check passed. Compare this score and runtime with the baseline ledger.")
 
-# %% [exercise]
+# %% [markdown]
+# ### Stop and explain
+#
+# What is the next single experiment, and what result would make you reject it?
+#
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
+#
+# Compare title-only, image-only and fused features on identical held-out product groups. Include
+# extraction/storage costs and self-only F1. Validate cache provenance and prove the route can
+# process new IDs before choosing it.
+#
+# </details>
+
+# %% [markdown]
+# ## 10. Reload and infer every test item
+#
+# Reload the trained vocabulary or preserved encoders/cache, recover chosen fusion settings and
+# infer all test match sets. Translate gallery positions back to posting IDs; include self and
+# avoid duplicate IDs.
+
+# %% [worked] [stage-10]
 started = perf_counter()
+
+# %% [markdown]
+# ### Exercise 7 — Reload and predict
+#
+# Reload the trained vocabulary or preserved encoders/cache, recover chosen fusion settings and
+# infer all test match sets. Translate gallery positions back to posting IDs; include self and
+# avoid duplicate IDs.
+#
+# <details>
+# <summary>Hint 1 — choose the operation</summary>
+#
+# Reload the trained vocabulary or preserved encoders/cache, recover chosen fusion settings and
+# infer all test match sets. Translate gallery positions back to posting IDs; include self and
+# avoid duplicate IDs.
+#
+# </details>
+#
+# <details>
+# <summary>Hint 2 — implementation direction</summary>
+#
+# reload the training vocabulary; never refit it on the test gallery
+#
+# </details>
+
+# %% [exercise] [stage-10]
 # >>> exercise: reload the training vocabulary; never refit it on the test gallery
 vectorizer = load_pickle(checkpoint_path)
 assert match_positions(features_for(va), selected_threshold) == validation_positions
 test_positions = match_positions(features_for(test), selected_threshold)
 # <<< exercise
+
+# %% [worked] [stage-10]
 output_values = {
     "matches": [" ".join(test.iloc[positions][ID_COLUMN].tolist()) for positions in test_positions]
 }
@@ -877,18 +1485,44 @@ save_json(
 )
 inference_seconds = perf_counter() - started
 
+# %% [check] [stage-10]
+assert set(output_values) == set(sample.columns) - {ID_COLUMN}
+assert all(len(values) == len(test) for values in output_values.values())
+print("Inference checks passed: every test item has the required output columns.")
+
 # %% [markdown]
-# ## 11. Validate the submission and persist the recipe
+# ### Stop and explain
 #
-# Validate the on-disk UTF-8 file, expected columns, ID order and task-specific value
-# constraints. Keep source, preprocessing, fold IDs, labels, thresholds, score and runtime with
-# the selected artifact. A checked CSV is not proof of upload acceptance.
+# Can this saved candidate handle every private input without refitting or downloading anything?
+# Which assets must travel with it?
 #
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
 #
+# Reload the trained vocabulary or preserved encoders/cache, recover chosen fusion settings and
+# infer all test match sets. Translate gallery positions back to posting IDs; include self and
+# avoid duplicate IDs.
 #
+# </details>
+
+# %% [markdown]
+# ## 11. Deliver and verify the submission
+#
+# Return a set of matching posting IDs for every query item. The original Shopee contract includes
+# the query itself. Product groups define relevance; pairwise accuracy is not the official mean
+# per-query set F1.
+#
+# Write the CSV, read it back, and verify IDs, columns, row count, missing values and allowed
+# prediction values before saving the complete recipe. A local check does not confirm organizer
+# upload acceptance.
+
+# %% [markdown]
+# ### Supplied helper — `SubmissionValidation`
+#
+# Validation errors and non-fatal warnings for a candidate submission.
 
 
-# %% [exercise]
+# %% [provided] [stage-11]
 @dataclass(slots=True)
 class SubmissionValidation:
     """Validation errors and non-fatal warnings for a candidate submission."""
@@ -903,6 +1537,16 @@ class SubmissionValidation:
             raise ValueError("Invalid submission: " + "; ".join(self.errors))
 
 
+# %% [markdown]
+# ### Supplied helper — `build_submission`
+#
+# Copy the sample and optionally align predictions using unique (possibly composite) IDs.
+#
+# Without IDs, predictions must already be in sample order. Prefer explicit IDs for inference.
+# Alignment rejects missing, duplicate, extra, or absent keys rather than guessing row order.
+
+
+# %% [provided] [stage-11]
 def build_submission(
     sample: pd.DataFrame,
     predictions: Mapping[str, Sequence[object]],
@@ -953,6 +1597,13 @@ def build_submission(
     return submission
 
 
+# %% [markdown]
+# ### Supplied helper — `validate_submission`
+#
+# Check schema, row count, ID order, missing values, and optional allowed labels.
+
+
+# %% [provided] [stage-11]
 def validate_submission(
     submission: pd.DataFrame,
     sample: pd.DataFrame,
@@ -998,6 +1649,13 @@ def validate_submission(
     return SubmissionValidation(valid=not errors, errors=errors, warnings=warnings)
 
 
+# %% [markdown]
+# ### Supplied helper — `write_submission`
+#
+# Validate then atomically write a UTF-8 CSV submission.
+
+
+# %% [provided] [stage-11]
 def write_submission(
     submission: pd.DataFrame,
     path: Path | str,
@@ -1023,6 +1681,14 @@ def write_submission(
     return destination
 
 
+# %% [markdown]
+# ### Supplied helper — `_mapping`
+#
+# Run this supplied definition before its callers. Its inputs and invariants are explained in this
+# section.
+
+
+# %% [provided] [stage-11]
 def _mapping(value: Any) -> Mapping[str, Any]:
     if is_dataclass(value):
         return asdict(value)
@@ -1031,6 +1697,13 @@ def _mapping(value: Any) -> Mapping[str, Any]:
     raise TypeError("Expected a dataclass or mapping")
 
 
+# %% [markdown]
+# ### Supplied helper — `technical_report`
+#
+# Render the standard competition handoff report as Markdown text.
+
+
+# %% [provided] [stage-11]
 def technical_report(
     *,
     task: str,
@@ -1069,6 +1742,13 @@ def technical_report(
     return "\n".join(lines) + "\n"
 
 
+# %% [markdown]
+# ### Supplied helper — `write_technical_report`
+#
+# Write a UTF-8 technical report, creating its parent directory.
+
+
+# %% [provided] [stage-11]
 def write_technical_report(content: str, path: Path | str) -> Path:
     """Write a UTF-8 technical report, creating its parent directory."""
     destination = Path(path)
@@ -1077,6 +1757,13 @@ def write_technical_report(content: str, path: Path | str) -> Path:
     return destination
 
 
+# %% [markdown]
+# ### Supplied helper — `record_run`
+#
+# Save configuration/fold positions and a matching human-readable technical report.
+
+
+# %% [provided] [stage-11]
 def record_run(
     output_dir: Path | str,
     *,
@@ -1124,13 +1811,85 @@ def record_run(
     return write_technical_report(report, root / "technical_report.md")
 
 
-# >>> exercise: align predictions to sample IDs and validate the complete file
-submission = build_submission(
-    sample, output_values, prediction_ids=test[ID_COLUMN], id_columns=ID_COLUMN
+# %% [markdown]
+# ### Exercise 8 — `deliver_submission`
+#
+# Input: sample template, named predictions, prediction IDs, key-column name and output path.
+# Return: ID-aligned checked frame and saved CSV path. Reject duplicated, missing or extra
+# prediction keys.
+#
+# <details>
+# <summary>Hint 1 — choose the operation</summary>
+#
+# Return a set of matching posting IDs for every query item. The original Shopee contract includes
+# the query itself. Product groups define relevance; pairwise accuracy is not the official mean
+# per-query set F1.
+#
+# </details>
+#
+# <details>
+# <summary>Hint 2 — implementation direction</summary>
+#
+# Build by ID, raise validation errors, then write the validated frame. Never assume test order
+# equals sample order.
+#
+# </details>
+
+
+# %% [exercise] [stage-11]
+def deliver_submission(
+    sample_frame: pd.DataFrame,
+    predictions: Mapping[str, Sequence[object]],
+    prediction_ids: Sequence[object],
+    id_column: str,
+    output_path: Path,
+) -> Any:
+    """Input: sample template, named predictions, prediction IDs, key-column name and output
+    path. Return: ID-aligned checked frame and saved CSV path. Reject duplicated, missing or
+    extra prediction keys.
+    """
+    # >>> exercise: implement deliver_submission using the stated contract
+    submission = build_submission(
+        sample_frame, predictions, prediction_ids=prediction_ids, id_columns=id_column
+    )
+    validate_submission(submission, sample_frame, id_columns=id_column).raise_for_errors()
+    destination = write_submission(submission, output_path)
+    # <<< exercise
+    return submission, destination
+
+
+# %% [markdown]
+# **Check before continuing.** Predict the result, run the small test below, and use its assertion
+# message to locate an error. Expected: all assertions pass and the printed success message
+# appears. These checks do not fit the real candidate.
+
+# %% [check] [stage-11]
+toy_sample = pd.DataFrame({"key": ["001", "NA"], "prediction": [0.0, 0.0]})
+toy_submission, toy_path = deliver_submission(
+    toy_sample, {"prediction": [0.8, 0.2]}, ["NA", "001"], "key", OUTPUT / "checks" / "delivery.csv"
 )
-validate_submission(submission, sample, id_columns=ID_COLUMN).raise_for_errors()
-destination = write_submission(submission, OUTPUT / "submission.csv")
-# <<< exercise
+assert toy_submission["key"].tolist() == ["001", "NA"], "Preserve literal IDs and sample order"
+np.testing.assert_allclose(toy_submission["prediction"], [0.2, 0.8])
+toy_loaded = pd.read_csv(toy_path, converters={"key": str}, keep_default_na=False)
+assert toy_loaded["key"].tolist() == ["001", "NA"]
+try:
+    deliver_submission(
+        toy_sample,
+        {"prediction": [0.2, 0.8]},
+        ["001", "001"],
+        "key",
+        OUTPUT / "checks" / "invalid.csv",
+    )
+except ValueError:
+    pass
+else:
+    raise AssertionError("Duplicate prediction IDs must be rejected, not guessed")
+print("Delivery checks passed: shuffled/literal IDs and duplicate rejection.")
+
+# %% [worked] [stage-11]
+submission, destination = deliver_submission(
+    sample, output_values, test[ID_COLUMN], ID_COLUMN, OUTPUT / "submission.csv"
+)
 roundtrip = pd.read_csv(
     destination, converters={ID_COLUMN: str}, keep_default_na=False, float_precision="round_trip"
 )
@@ -1144,23 +1903,18 @@ save_json(
 )
 save_json(
     {
-        "epochs": EPOCHS,
-        "batch_size": BATCH_SIZE,
         "seed": SEED,
         "max_rows": MAX_ROWS,
-        "image_size": IMAGE_SIZE,
         "model_name": MODEL_NAME,
-        "max_length": MAX_LENGTH,
-        "embedding_dim": EMBEDDING_DIM,
         "imbalance_weights": USE_IMBALANCE_WEIGHTS,
-        "history_features": USE_HISTORY_FEATURES,
         "pretrained_allowed": PRETRAINED_ALLOWED,
-        "initial_weight_path": WEIGHT_PATH,
         "asset_provenance": ASSET_PROVENANCE,
         "trainer": globals().get("training"),
     },
     OUTPUT / "lesson_config.json",
 )
+
+# %% [worked] [stage-11]
 record_run(
     OUTPUT,
     task=FAMILY,
@@ -1175,8 +1929,6 @@ record_run(
     inference_options={
         "threshold": float(selected_threshold),
         "label_order": TARGET_COLUMNS,
-        "image_size": IMAGE_SIZE,
-        "max_length": MAX_LENGTH,
         "model_name": MODEL_NAME,
         "asset_provenance": ASSET_PROVENANCE,
     },
@@ -1187,6 +1939,8 @@ record_run(
         f"Imbalance weights enabled: {USE_IMBALANCE_WEIGHTS}",
     ],
 )
+
+# %% [worked] [stage-11]
 pd.DataFrame(
     [
         {
@@ -1199,8 +1953,51 @@ pd.DataFrame(
         }
     ]
 ).to_csv(OUTPUT / "comparison_row.csv", index=False)
-# Save your edited notebook/source alongside this folder before transferring the bundle.
 copied = sync_artifacts(OUTPUT, DURABLE_OUTPUT)
 print("Checked local CSV:", destination, "Durable files copied:", len(copied))
 
-# ruff: noqa: E402
+# %% [check] [stage-11]
+assert destination.is_file()
+assert submission[ID_COLUMN].tolist() == sample[ID_COLUMN].tolist()
+print("Delivery complete. Next: restart inference, then attempt the reconstruction task.")
+
+# %% [markdown]
+# ### Stop and explain
+#
+# Which ID-order or encoding mistake would survive a plausible-looking preview? What did the
+# on-disk round trip prove?
+#
+# <details>
+# <summary>Reasoning checkpoint — open after writing your answer</summary>
+#
+# Shuffled sample IDs and literal strings such as 001/NA require explicit alignment and CSV
+# parsing. Readback checks the delivered file's schema/order/values; official task semantics and
+# upload acceptance still need separate confirmation.
+#
+# </details>
+
+# %% [markdown]
+# ## Transfer and closed-book reconstruction
+#
+# A private gallery introduces unseen posting IDs and zero-text items. Explain why an ID-bound
+# feature cache cannot handle them, then rebuild the sparse baseline and verify self inclusion
+# across query batch sizes.
+#
+# 1. Close the reference notebook and create an empty personal notebook.
+# 2. Rebuild the data contract, split, features/model, fit, official metric and submission path.
+# 3. Deliver a checked small-pack CSV within 45–60 minutes, then reload it in a fresh session.
+# 4. Record elapsed time, hints, bugs and the first function you could not reconstruct.
+# 5. Rebuild that function the next day with a different schema or seed.
+#
+# For the 2k assistant, send one function signature, input/output shapes and one failing toy test.
+# Ask for an explanation or correction of that function only. Keep the rest of the notebook
+# outside the prompt.
+#
+# ### Controlled comparison
+#
+# Compare title-only, image-only and fused features on identical held-out product groups. Include
+# extraction/storage costs and self-only F1. Validate cache provenance and prove the route can
+# process new IDs before choosing it.
+#
+# A first correct submission is the readiness gate. Advanced complexity is selected only after an
+# honest metric/runtime comparison; no test fitting or model-weight permission is implied.
